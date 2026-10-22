@@ -2,6 +2,7 @@
 """Test helper: a local stand-in for Yahoo's chart endpoint, serving sample fixtures.
 The first request for each path answers 429 to exercise the retry logic.
 Usage: python3 scripts/mock_yahoo.py FIXTURE_DIR PORT"""
+import os
 import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +30,8 @@ class H(BaseHTTPRequestHandler):
         q = [(k, v) for k, v in parse_qsl(u.query, keep_blank_values=True) if k != "crumb"]
         # rebuild the URL exactly as scripts/lib/market.mjs writes it
         url = "https://query1.finance.yahoo.com" + u.path + "?" + urlencode(q)
+        if os.environ.get("MOCK_ALWAYS_429"):
+            return self.send(429, b"Too Many Requests", "text/plain")
         if self.path not in seen:
             seen.add(self.path)
             return self.send(429, b"Too Many Requests", "text/plain")

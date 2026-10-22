@@ -4,13 +4,14 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import zlib from 'node:zlib';
 import assert from 'node:assert/strict';
 import { spawnSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseFeed, scoreStory } from './lib/news.mjs';
 import { INSTRUMENTS } from './config.mjs';
 import { fixtureName } from './lib/util.mjs';
-import { chartUrl } from './lib/market.mjs';
+import { chartUrl, cacheKey } from './lib/market.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'fp-test-'));
@@ -196,6 +197,95 @@ ok('Sunday evening open');
     const rep2 = JSON.parse(await fs.readFile(path.join(outDir, '_report.json'), 'utf8'));
     assert.ok(r2.status === 0 && rep2.cached >= INSTRUMENTS.length * 2, 'daily/hourly history served from cache');
     ok(`browser-style fetcher retries 429s and caches history (${rep.mode})`);
+  }
+}
+
+// Price relay: bundle from "your computer" is unpacked and used; stale bundles are not.
+{
+  const fx = path.join(tmp, 'pre', 'fx');
+  const mes = INSTRUMENTS.find((i) => i.id === 'MES');
+  const files = {};
+  for (const [r, iv] of [['1y', '1d'], ['3mo', '60m'], ['5d', '5m']]) {
+    files[cacheKey(mes.yahoo[0], r, iv)] = await fs.readFile(path.join(fx, fixtureName(chartUrl('https://query1.finance.yahoo.com', mes.yahoo[0], r, iv))), 'utf8');
+  }
+  files['..%2Fevil.json'] = '{}'; // odd names must be ignored
+  const mk = async (name, at) => { const f = path.join(tmp, name); await fs.writeFile(f, zlib.gzipSync(JSON.stringify({ at, kind: 'full', files }))); return f; };
+  const cache = path.join(tmp, 'relay-cache');
+  const unpack = (b) => spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'relay.mjs'), '--unpack', b, cache], { encoding: 'utf8' });
+  let r = unpack(await mk('old.json.gz', new Date(Date.now() - 2 * 3600e3).toISOString()));
+  assert.equal(r.status, 0, r.stderr);
+  let info = JSON.parse(await fs.readFile(path.join(cache, '_relay.json'), 'utf8'));
+  assert.equal(info.used, false, 'stale bundle ignored');
+  r = unpack(await mk('new.json.gz', new Date(Date.now() - 4 * 60e3).toISOString()));
+  info = JSON.parse(await fs.readFile(path.join(cache, '_relay.json'), 'utf8'));
+  assert.equal(info.used, true);
+  assert.ok(!(await fs.readdir(cache)).some((f) => f.includes('evil')), 'unsafe names skipped');
+  // the updater uses the relay files even with Yahoo unreachable
+  const fx2 = path.join(tmp, 'fx-noyahoo');
+  await fs.mkdir(fx2, { recursive: true });
+  for (const f of await fs.readdir(fx)) if (!f.startsWith('query1.finance.yahoo.com')) await fs.copyFile(path.join(fx, f), path.join(fx2, f));
+  run('update.mjs', { FIXTURE_DIR: fx2, FIXTURE_NOW: '2026-10-22T11:00:00.000Z', PRICE_CACHE_DIR: cache, DIST_DIR: path.join(tmp, 'relay-dist'), STATE_DIR: path.join(tmp, 'relay-state'), SAMPLE: '1' });
+  const d = JSON.parse(await fs.readFile(path.join(tmp, 'relay-dist', 'data', 'market.json'), 'utf8'));
+  const m = d.instruments.find((i) => i.id === 'MES');
+  assert.match(m.source, /your computer/);
+  assert.ok(Number.isFinite(m.price) && m.levels.length > 6);
+  assert.ok(d.relay?.used && d.feeds.some((f) => f.name.startsWith('Price relay') && f.ok));
+  ok('price relay bundle used when fresh, ignored when stale, unsafe names skipped');
+}
+
+// Relay upload against a mock GitHub API (git data API + workflow dispatch).
+{
+  const calls = [];
+  let blob = null;
+  const srv = http.createServer((req, res) => {
+    let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => {
+      calls.push(`${req.method} ${req.url}`);
+      const send = (code, j) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(j ? JSON.stringify(j) : ''); };
+      if (req.headers.authorization !== 'Bearer test-token') return send(401, { message: 'Bad credentials' });
+      if (req.url.endsWith('/git/blobs')) { blob = JSON.parse(b); return send(201, { sha: 'b1' }); }
+      if (req.url.endsWith('/git/trees')) return send(201, { sha: 't1' });
+      if (req.url.endsWith('/git/commits')) { assert.deepEqual(JSON.parse(b).parents, []); return send(201, { sha: 'c1' }); }
+      if (req.method === 'PATCH' && req.url.includes('/git/refs/heads/price-relay')) return send(422, { message: 'Reference does not exist' });
+      if (req.method === 'POST' && req.url.endsWith('/git/refs')) return send(201, { ref: 'refs/heads/price-relay' });
+      if (req.url.endsWith('/actions/workflows/update.yml/dispatches')) return send(204);
+      return send(404, { message: 'nope' });
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  await runAsync('relay.mjs', {
+    FIXTURE_DIR: path.join(tmp, 'pre', 'fx'), FP_RELAY_API: `http://127.0.0.1:${port}`,
+    FP_RELAY_REPO: 'someone/futures', FP_RELAY_TOKEN: 'test-token', HOME: tmp, USERPROFILE: tmp,
+  });
+  srv.close();
+  assert.ok(calls.some((c) => c.startsWith('POST /repos/someone/futures/git/refs')), 'branch created');
+  assert.ok(calls.some((c) => c.endsWith('/dispatches')), 'update started');
+  const bundle = JSON.parse(zlib.gunzipSync(Buffer.from(blob.content, 'base64')).toString('utf8'));
+  assert.ok(Object.keys(bundle.files).length >= INSTRUMENTS.length * 3, 'full history on first run');
+  ok('relay uploads a single-commit bundle to the price-relay branch and starts an update');
+}
+
+// Fail-fast: a site that keeps refusing doesn't stall the job.
+{
+  const py = process.env.PYTHON || 'python3';
+  const probe = spawnSync(py, ['-c', 'import importlib.util,sys; sys.exit(0 if (importlib.util.find_spec("curl_cffi") or importlib.util.find_spec("requests")) else 1)']);
+  if (probe.status === 0) {
+    const port = 20000 + Math.floor(Math.random() * 2000);
+    const mock = spawn(py, [path.join(ROOT, 'scripts', 'mock_yahoo.py'), path.join(tmp, 'pre', 'fx'), String(port)], { stdio: 'ignore', env: { ...process.env, MOCK_ALWAYS_429: '1' } });
+    await new Promise((r) => setTimeout(r, 800));
+    const plan = path.join(tmp, 'plan2.json'), outDir = path.join(tmp, 'prices-blocked');
+    await fs.writeFile(plan, run('price-plan.mjs', {}));
+    const t0 = Date.now();
+    const r = spawnSync(py, [path.join(ROOT, 'scripts', 'fetch_prices.py'), plan, outDir], {
+      env: { ...process.env, YF_HOSTS: `http://127.0.0.1:${port}`, YF_COOKIE_URL: `http://127.0.0.1:${port}/`, STOOQ_BASE: `http://127.0.0.1:${port}`, YF_GAP_SECONDS: '0.01' }, encoding: 'utf8',
+    });
+    mock.kill();
+    const secs = (Date.now() - t0) / 1000;
+    const rep = JSON.parse(await fs.readFile(path.join(outDir, '_report.json'), 'utf8'));
+    assert.equal(r.status, 0);
+    assert.ok(rep.yahoo.blocked, 'Yahoo marked as refusing');
+    assert.ok(secs < 40, `finished quickly (${secs.toFixed(1)}s)`);
+    ok(`blocked sites are abandoned quickly (${secs.toFixed(1)}s)`);
   }
 }
 

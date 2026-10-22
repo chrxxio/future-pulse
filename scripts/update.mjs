@@ -40,6 +40,7 @@ async function main() {
 
   const state = (await readJSON(path.join(STATE_DIR, 'state.json'), {})) || {};
   const priceReport = process.env.PRICE_CACHE_DIR ? await readJSON(path.join(process.env.PRICE_CACHE_DIR, '_report.json'), null) : null;
+  const relayInfo = process.env.PRICE_CACHE_DIR ? await readJSON(path.join(process.env.PRICE_CACHE_DIR, '_relay.json'), null) : null;
   const prev = await readJSON(path.join(STATE_DIR, 'last.json'), null);
 
   // ---- fetch everything in parallel ----
@@ -148,8 +149,12 @@ async function main() {
       ...newsRaw.health,
       { name: 'Economic calendar (Forex Factory)', ok: cal.raw.length > 0, count: cal.raw.length, error: cal.errors.join('; ') || undefined, cached: cal.cached },
       ...instData.map(({ inst, data, error }) => ({ name: `Prices: ${inst.id}${data ? ` (${data.symbol}, ${data.source})` : ''}`, ok: !!data, count: data ? data.m5.length || data.daily.length : 0, error })),
-      ...(priceReport ? [{ name: `Browser-style price fetch (${priceReport.mode})`, ok: priceReport.ok > 0, count: priceReport.ok, error: priceReport.failed ? `${priceReport.failed} requests refused: ${priceReport.lastError || ''}`.trim() : undefined }] : []),
+      ...(priceReport ? [{ name: `Browser-style price fetch from GitHub (${priceReport.mode})`, ok: priceReport.ok > 0, count: priceReport.ok,
+        error: priceReport.failed ? `Yahoo: ${priceReport.yahoo?.blocked ? 'refusing GitHub' : 'some failed'} (${priceReport.yahoo?.lastError || priceReport.lastError || ''})${priceReport.stooq?.tried ? `; Stooq: ${priceReport.stooq.blocked ? 'refusing GitHub' : 'tried'} (${priceReport.stooq.lastError || 'ok'})` : ''}` : undefined }] : []),
+      { name: 'Price relay (your computer)', ok: !!relayInfo?.used, count: relayInfo?.files || 0,
+        error: !relayInfo ? 'not set up (optional; see README)' : relayInfo.used ? undefined : `last bundle ${relayInfo.ageMin} min old (computer off or relay stopped)` },
     ],
+    relay: relayInfo ? { at: relayInfo.at, used: relayInfo.used, ageMin: relayInfo.ageMin } : null,
     ai: {
       enabled: aiEnabled(), model: aiEnabled() ? SETTINGS.aiModel : null,
       generatedAt: aiFresh ? state.ai.generatedAt : null, error: aiError,

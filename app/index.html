@@ -270,6 +270,24 @@ body.holo.sheet-open .holo-tools,body.holo.sheet-open .holo-ticker{right:472px}
 .holo-tip .big{font-stretch:72%;font-weight:700;font-size:21px}
 @media (prefers-reduced-motion: reduce){.bulb{animation:none}.tk.run{animation:none}}
 @media (max-width:1280px){.holo-legend{display:none}}
+.holo-pop{position:fixed;right:16px;bottom:70px;z-index:6;width:380px;max-width:calc(100vw - 460px);padding:12px 14px 14px;border-radius:14px;
+  background:rgba(9,13,24,.92);border:1px solid rgba(255,196,92,.35);box-shadow:0 18px 50px rgba(0,0,0,.55);color:var(--text);transition:right .26s}
+.holo-pop[hidden]{display:none}
+body.holo.sheet-open .holo-pop{display:none}
+.pop-top{display:flex;align-items:center;gap:8px;font-size:12.5px;color:#FFD891;font-weight:600}
+.pop-top .m{margin-left:auto;color:var(--muted);font-weight:400}
+.pop-x{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:18px;line-height:1;color:var(--muted);background:rgba(255,236,206,.07)}
+.pop-x:hover{color:var(--text)}
+.pop-title{display:block;margin-top:8px;font-weight:650;font-size:16px;line-height:1.35;text-decoration:none;color:var(--text)}
+.pop-title:hover{text-decoration:underline;text-underline-offset:3px}
+.pop-meta,.pop-why{margin-top:6px;font-size:12.5px;color:var(--muted)}
+.pop-nav{display:flex;gap:8px;margin-top:12px}
+.pop-nav .chip{background:rgba(255,236,206,.06);border-color:var(--edge);color:var(--text);padding:6px 12px;font-size:13px;text-decoration:none}
+.pop-nav .chip:hover{border-color:rgba(255,196,92,.6)}
+.pop-bar{height:2px;background:rgba(255,236,206,.08);border-radius:1px;margin-top:12px;overflow:hidden}
+.pop-bar i{display:block;height:100%;width:0;background:#FFC45C}
+.holo-status{max-width:min(520px,calc(100vw - 880px))}
+body.holo.focus .holo-status{max-width:min(520px,calc(100vw - 450px))}
 body.holo header.top,body.holo nav.tabs,body.holo .sheet header{-webkit-backdrop-filter:none;backdrop-filter:none}
 body.holo .hud-left{transition:transform .32s cubic-bezier(.2,.8,.2,1),opacity .32s}
 body.holo.focus .hud-left{transform:translateX(calc(-100% - 32px));opacity:0;pointer-events:none}
@@ -428,7 +446,8 @@ function banners() {
   const noPx = d.instruments.filter((i) => !Number.isFinite(i.price));
   const errs = d.instruments.map((i) => i.error || '').join(' ');
   const why = /429/.test(errs) ? 'Yahoo refused requests from GitHub’s servers (HTTP 429)' : 'the price sources didn’t respond';
-  if (noPx.length === d.instruments.length) h += `<div class="note bad">Prices didn’t load this update: ${why}. Each update retries on its own; Settings shows what every source returned.</div>`;
+  const relayTip = d.relay?.used ? '' : ' For reliable prices, run the price relay on your computer (README, “Price relay”).';
+  if (noPx.length === d.instruments.length) h += `<div class="note bad">Prices didn’t load this update: ${why}. Each update retries on its own; Settings shows what every source returned.${relayTip}</div>`;
   else if (noPx.length) h += `<div class="note bad">No price this update for ${esc(noPx.map((i) => i.id).join(', '))} (${why}).</div>`;
   const stale = d.instruments.filter((i) => i.stale && Number.isFinite(i.price));
   if (stale.length) h += `<div class="note">${esc(stale.map((i) => i.id).join(', '))}: showing the last good update, because this one couldn’t fetch new prices.</div>`;
@@ -705,6 +724,9 @@ function openSettings() {
     <label for="repo">Repository</label><input id="repo" value="${esc(store.get('ghRepo', repo))}" placeholder="owner/repo">
     <button class="btn" id="runNow">Start update</button> <button class="btn sec" id="forget">Remove token</button>
 
+    <h2 class="sec">Price relay</h2>
+    <p class="muted" style="margin:0;font-size:14px">${d.relay?.used ? `Prices are coming from your computer (sent ${d.relay.ageMin} min before this update).` : d.relay ? `Your computer last sent prices ${d.relay.ageMin} min before this update, too old to use. Is the relay running?` : 'Not set up. GitHub’s servers are often refused by free price sites; running the small relay on your computer fixes that. See the README, “Price relay”.'}</p>
+
     <h2 class="sec">AI analysis</h2>
     <p class="muted" style="margin:0;font-size:14px">${d.ai?.enabled ? `On (${esc(d.ai.model)}). Last written ${d.ai.generatedAt ? ago(d.ai.generatedAt) : 'not yet'}.${d.ai.error ? ` Last error: ${esc(d.ai.error)}` : ''}` : 'Off. Add an ANTHROPIC_API_KEY repository secret to get written analysis for each market.'}</p>
 
@@ -792,6 +814,7 @@ window.FP = {
   panelRight: () => (document.body.classList.contains('holo') && !document.body.classList.contains('focus') ? $('#hud').getBoundingClientRect().right : 0),
   sheetOpen: () => $('#sheet').classList.contains('open'),
   onHoloReady: () => applyLayout(),
+  toast,
 };
 applyLayout();
 

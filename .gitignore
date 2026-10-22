@@ -1,0 +1,8 @@
+dist/
+state/
+node_modules/
+.DS_Store
+relay.config.json
+.relay-state.json
+.venv/
+__pycache__/

@@ -1,8 +1,10 @@
 // Price data. Sources, in order:
-//   1. Yahoo chart data pre-fetched by scripts/fetch_prices.py, which connects with a
-//      Chrome-like TLS fingerprint (Yahoo answers plain server requests with HTTP 429).
+//   1. Files in PRICE_CACHE_DIR: sent by the price relay on your computer
+//      (scripts/relay.mjs — home internet, which Yahoo serves normally), or pre-fetched
+//      by scripts/fetch_prices.py with a browser-like connection.
 //   2. Yahoo fetched directly from Node (works from home internet; often 429 on GitHub).
 //   3. Stooq daily data (no intraday) — levels from overnight/VWAP/volume are skipped.
+// A site that keeps refusing (429/403) is skipped for the rest of the run.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fetchJSON, fetchText, sessionKey, etParts, weekKey, monthKey, last, sleep } from './util.mjs';
@@ -16,20 +18,33 @@ export const chartUrl = (host, symbol, range, interval) =>
   `${host}/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}&includePrePost=true&events=div%2Csplits`;
 export const cacheKey = (symbol, range, interval) => `${symbol}_${range}_${interval}`.replace(/[^A-Za-z0-9._=-]+/g, '_') + '.json';
 
-async function fromCache(symbol, range, interval) {
+let origins = null;
+async function originOf(file) {
+  if (!origins) origins = (await fs.readFile(path.join(CACHE, '_origin.json'), 'utf8').then(JSON.parse).catch(() => ({})));
+  return origins[file] || 'browser-style fetch';
+}
+async function cachedFile(name, maxAge) {
   if (!CACHE) return null;
-  const f = path.join(CACHE, cacheKey(symbol, range, interval));
+  const f = path.join(CACHE, name);
   try {
     const st = await fs.stat(f);
-    if (Date.now() - st.mtimeMs > (MAX_AGE[interval] || 3600e3)) return null;
-    const r = JSON.parse(await fs.readFile(f, 'utf8'))?.chart?.result?.[0];
-    return r || null;
+    if (Date.now() - st.mtimeMs > maxAge) return null;
+    return { text: await fs.readFile(f, 'utf8'), origin: await originOf(name), at: st.mtimeMs };
   } catch { return null; }
 }
 
+// Stop hammering a site that is clearly refusing us.
+const refusals = { yahoo: 0, stooq: 0 };
+const blocked = (site) => refusals[site] >= 3;
+const noteRefusal = (site, e) => { if (/HTTP (401|403|429)/.test(String(e?.message))) refusals[site]++; };
+
 async function chart(symbol, range, interval, via) {
-  const cached = await fromCache(symbol, range, interval);
-  if (cached) { via.add('browser-style fetch'); return cached; }
+  const c = await cachedFile(cacheKey(symbol, range, interval), MAX_AGE[interval] || 3600e3);
+  if (c) {
+    const r = JSON.parse(c.text)?.chart?.result?.[0];
+    if (r) { via.add(c.origin); return r; }
+  }
+  if (blocked('yahoo')) throw new Error('HTTP 429 (Yahoo is refusing this server; skipped)');
   let lastErr;
   for (const host of HOSTS) {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -38,13 +53,16 @@ async function chart(symbol, range, interval, via) {
         const r = j?.chart?.result?.[0];
         if (!r) throw new Error(j?.chart?.error?.description || 'empty chart');
         via.add('direct');
+        refusals.yahoo = 0;
         return r;
       } catch (e) {
         lastErr = e;
-        if (!/429/.test(String(e.message))) break;      // only back off on rate limiting
-        await sleep(1500 + Math.random() * 1500);
+        noteRefusal('yahoo', e);
+        if (!/429/.test(String(e.message)) || blocked('yahoo')) break;
+        await sleep(1200 + Math.random() * 1200);
       }
     }
+    if (blocked('yahoo')) break;
   }
   throw lastErr;
 }
@@ -89,9 +107,17 @@ function parseCsv(text) {
   const head = lines.shift()?.split(',').map((x) => x.trim().toLowerCase()) || [];
   return lines.map((l) => Object.fromEntries(l.split(',').map((v, i) => [head[i], v.trim()])));
 }
+const safeName = (x) => x.replace(/[^A-Za-z0-9._=-]+/g, '_');
+async function stooqText(kind, url, maxAge) {
+  const c = await cachedFile(safeName(`stooq_${kind}.csv`), maxAge);
+  if (c) return c.text;
+  if (blocked('stooq')) throw new Error('HTTP 403 (Stooq is refusing this server; skipped)');
+  try { return await fetchText(url, { timeout: 15000, retries: 0 }); }
+  catch (e) { noteRefusal('stooq', e); throw e; }
+}
 async function loadStooq(inst) {
   if (!inst.stooq) throw new Error('no Stooq symbol configured');
-  const rows = parseCsv(await fetchText(`${STOOQ}/q/d/l/?s=${inst.stooq}&i=d`, { timeout: 15000, retries: 1 }));
+  const rows = parseCsv(await stooqText(`${inst.stooq}_d`, `${STOOQ}/q/d/l/?s=${inst.stooq}&i=d`, 6 * 3600e3));
   const daily = rows.map((r) => ({
     // noon ET on the trading date maps cleanly onto that session
     t: Date.parse(`${r.date}T16:00:00Z`), o: +r.open, h: +r.high, l: +r.low, c: +r.close, v: +(r.volume || 0),
@@ -99,7 +125,7 @@ async function loadStooq(inst) {
   if (daily.length < 30) throw new Error(/limit/i.test(rows[0]?.date || '') ? 'Stooq daily limit reached' : 'no Stooq data');
   let price = last(daily).c;
   try {
-    const q = parseCsv(await fetchText(`${STOOQ}/q/l/?s=${inst.stooq}&f=sd2t2ohlcv&h&e=csv`, { timeout: 12000 }))[0];
+    const q = parseCsv(await stooqText(`${inst.stooq}_q`, `${STOOQ}/q/l/?s=${inst.stooq}&f=sd2t2ohlcv&h&e=csv`, 25 * 60e3))[0];
     if (q && +q.close > 0) {
       price = +q.close;
       const lastBar = last(daily);

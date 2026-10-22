@@ -4,11 +4,15 @@
   "private": true,
   "description": "Phone app (GitHub Pages) with live support/resistance levels, sentiment and market-moving news for CME micro futures.",
   "type": "module",
-  "engines": { "node": ">=18.17" },
+  "engines": {
+    "node": ">=18.17"
+  },
   "scripts": {
     "update": "node scripts/update.mjs",
     "sample": "node scripts/sample.mjs",
     "serve": "python3 -m http.server 8080 --directory dist",
-    "test": "node scripts/test.mjs"
+    "test": "node scripts/test.mjs",
+    "relay": "node scripts/relay.mjs --watch",
+    "relay:once": "node scripts/relay.mjs"
   }
 }

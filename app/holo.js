@@ -6,6 +6,7 @@
 //   Outer light string          = scheduled releases on a 24-hour clock (blue = high impact)
 //   Lanterns near the globe     = VIX, dollar index, 10-year yield
 //   Shooting stars              = headlines that arrived in the latest update
+//   Pop-up card (bottom right)  = one headline at a time; the globe turns to it and a wire links them
 (() => {
 'use strict';
 const FP = window.FP;
@@ -39,6 +40,9 @@ let enabled = false, raf = 0, last = 0, T = 0, spin = 0, lastInteract = -1e9, di
 let quality = 2, frameNo = 0, costAvg = 0;
 let intro = null, introDone = false, focus = false, autoSpin = true;
 const bursts = [];
+// headline spotlight (pop-up card)
+const POP_SECONDS = 14;
+const pop = { on: FP.store.get('holoPopups', true), queue: [], i: -1, cur: null, elapsed: 0, hold: false, rect: null, el: null };
 let prevGen = null, prevNewsIds = null, prevLabels = {};
 const ease = (u) => (u <= 0 ? 0 : u >= 1 ? 1 : 1 - Math.pow(1 - u, 3));
 // power-on: everything lights up in sequence the first time the globe opens
@@ -193,6 +197,15 @@ function setData(d) {
   prevGen = d.generatedAt;
   prevNewsIds = new Set(news.map((o) => o.n.id));
   prevLabels = Object.fromEntries(planets.map((p) => [p.id, p.inst.sentiment?.label]));
+  // spotlight order: recent and high-impact first, shuffled a little so it doesn't feel fixed
+  const impW = { high: 3, med: 2, low: 1 };
+  const ranked = news.filter((o) => o.n.ageMin < 24 * 60)
+    .map((o) => ({ o, w: impW[o.n.impact] * (o.breaking ? 1.6 : 1) * Math.exp(-o.n.ageMin / 360) * (0.6 + Math.random() * 0.8) }))
+    .sort((a, b) => b.w - a.w).slice(0, 40).map((x) => x.o);
+  const keepId = pop.cur?.n.id;
+  pop.queue = ranked;
+  pop.i = keepId ? ranked.findIndex((o) => o.n.id === keepId) : -1;
+  pop.cur = pop.i >= 0 ? ranked[pop.i] : null;
   scene = { planets, news, events, beams, macro, meanScore: scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0 };
   ticker(d);
   status();
@@ -422,6 +435,32 @@ function draw() {
   if (layers.markets) for (const pl of scene.planets) labelPlanet(pl);
   if (layers.calendar) for (const ev of scene.events) labelEvent(ev);
   if (layers.macro) for (const mo of scene.macro || []) labelMacro(mo);
+  drawSpotlightWire();
+}
+
+// A glowing wire from the spotlighted headline to its pop-up card.
+function drawSpotlightWire() {
+  const o = pop.cur;
+  if (!o || !pop.rect || !o.P || pop.el?.hidden) return;
+  const P = o.P, R = pop.rect;
+  const ex = R.left, ey = R.top + 30;
+  const facing = P.z > -0.1;
+  const sx = P.x, sy = P.y;
+  const c1x = sx + Math.max(80, (ex - sx) * 0.45), c1y = sy - 40, c2x = ex - 90, c2y = ey;
+  const at = (t) => { const u = 1 - t; return [u * u * u * sx + 3 * u * u * t * c1x + 3 * u * t * t * c2x + t * t * t * ex, u * u * u * sy + 3 * u * u * t * c1y + 3 * u * t * t * c2y + t * t * t * ey]; };
+  const pts = []; for (let k = 0; k <= 40; k++) { const [x, y] = at(k / 40); pts.push({ x, y }); }
+  ctx.globalCompositeOperation = 'lighter';
+  const a = facing ? 1 : 0.35;
+  strokePath(pts, rgba(C.gold, 0.1 * a), 7);
+  strokePath(pts, rgba(C.gold, 0.55 * a), 1.6);
+  if (!reduce) for (let k = 0; k < 3; k++) { const [x, y] = at((T * 0.32 + k / 3) % 1); miniBulb(x, y, 1.8, C.gold, 0.9 * a); }
+  miniBulb(ex, ey, 2.6, C.gold, 1);
+  // ring on the headline itself
+  const u = reduce ? 0.5 : (T * 0.8) % 1;
+  ctx.strokeStyle = rgba(C.gold, 0.85 * (1 - u) * a); ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(sx, sy, 7 + u * 16, 0, TAU); ctx.stroke();
+  halo(sx, sy, 26, C.gold, 0.5 * a);
+  ctx.globalCompositeOperation = 'source-over';
 }
 
 function drawNews(o, P) {
@@ -442,7 +481,7 @@ function drawNews(o, P) {
     ctx.beginPath(); ctx.arc(P.x, P.y, o.size * P.k * 1.6 + u * 12, 0, TAU); ctx.stroke();
   }
   if (o.breaking && !reduce) a *= Math.sin(T * 5 + o.ph) > -0.2 ? 1 : 0.18; // old chaser blink
-  const r = o.size * P.k * (hover?.ref === o ? 1.5 : 1);
+  const r = o.size * P.k * (hover?.ref === o || pop.cur === o ? 1.6 : 1);
   miniBulb(P.x, P.y, r, o.color, a);
   if (o.breaking && !back && !reduce) {
     const u = (T * 0.7 + o.ph) % 1;
@@ -545,7 +584,7 @@ function drawBeam(b, g0) {
   const Cp = [(m[0] / ml) * lift, (m[1] / ml) * lift, (m[2] / ml) * lift];
   const at = (t) => { const u = 1 - t; return [u * u * A[0] + 2 * u * t * Cp[0] + t * t * B[0], u * u * A[1] + 2 * u * t * Cp[1] + t * t * B[1], u * u * A[2] + 2 * u * t * Cp[2] + t * t * B[2]]; };
   const pts = []; for (let k = 0; k <= 28; k++) pts.push(proj(at(k / 28)));
-  const hl = hover && (hover.ref === b.from || hover.ref === b.to);
+  const hl = (hover && (hover.ref === b.from || hover.ref === b.to)) || pop.cur === b.from;
   strokePath(pts, rgba(b.color, hl ? 0.5 : b.strong ? 0.22 : 0.11), hl ? 1.6 : 1);
   if (!reduce) for (let k = 0; k < 2; k++) {
     const t = (T * 0.22 + b.ph + k * 0.5) % 1;
@@ -684,7 +723,7 @@ function tipHtml(h) {
     const fx = Object.entries(n.effects || {}).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 6)
       .map(([k, v]) => `<span class="${v > 0 ? 'up' : 'down'}">${esc(k)} ${v > 0 ? '▲' : '▼'}</span>`).join(' ');
     return `<b>${esc(n.title)}</b><br><span class="m">${esc(n.source)}${n.sources.length > 1 ? ` + ${n.sources.length - 1} more` : ''}, ${ago(n.publishedAt)}, ${esc(n.impact === 'med' ? 'medium' : n.impact)} impact</span>
-      ${fx ? `<br>${fx}` : ''}${n.rules?.length ? `<br><span class="m">${esc(n.rules.join(', '))}</span>` : ''}<br><span class="m">Click to open the article</span>`;
+      ${fx ? `<br>${fx}` : ''}${n.rules?.length ? `<br><span class="m">${esc(n.rules.join(', '))}</span>` : ''}<br><span class="m">${pop.on ? 'Click to show it in the pop-up' : 'Click to open the article'}</span>`;
   }
   if (h.type === 'macro') {
     const m = h.ref.m, isY = m.id === 'US10Y';
@@ -740,7 +779,10 @@ cv.addEventListener('pointerup', (e) => {
   const h = pick(e.clientX, e.clientY);
   if (!h) return;
   if (h.type === 'planet' || h.type === 'level') FP.openDetail((h.ref.pl || h.ref).id);
-  else if (h.type === 'news') window.open(FP.safeUrl(h.ref.n.url), '_blank', 'noopener');
+  else if (h.type === 'news') {
+    if (pop.on && !FP.sheetOpen()) spotlight(h.ref); // show it in the pop-up card
+    else window.open(FP.safeUrl(h.ref.n.url), '_blank', 'noopener');
+  }
   else if (h.type === 'event') FP.setTab('events');
 });
 cv.addEventListener('pointerleave', () => { hover = null; tip.hidden = true; dirty = true; });
@@ -753,6 +795,7 @@ function buildUi() {
     <div class="holo-tools" role="toolbar" aria-label="Globe layers">
       ${L.map(([k, t]) => `<button class="chip" data-layer="${k}" aria-pressed="${!!layers[k]}">${t}</button>`).join('')}
       <button class="chip" data-holo-reset>Reset view</button>
+      <button class="chip" data-holo-pop aria-pressed="${pop.on}">Article pop-ups</button>
       <button class="chip" data-holo-focus aria-pressed="false">Full screen</button>
       <button class="chip" data-layout="classic">Phone layout</button>
     </div>
@@ -763,16 +806,92 @@ function buildUi() {
       <div><i style="background:rgb(${C.warm});color:rgb(${C.warm})"></i>Headline (blinking = breaking)</div>
       <div><i style="background:rgb(${C.blue});color:rgb(${C.blue})"></i>High-impact release</div>
       <div><i style="background:rgb(${C.gold});color:rgb(${C.gold})"></i>VIX, dollar, 10Y lanterns</div>
-      <p>Bulb size shows conviction; the gold ring is how much of a normal day's range is used. Moons beside each market are its key levels: red above price, green below. Drag to turn, scroll to zoom, F for full screen.</p>
+      <p>Bulb size shows conviction; the gold ring is how much of a normal day's range is used. Moons beside each market are its key levels: red above price, green below. Drag to turn, scroll to zoom, F for full screen, N and P to step through the pop-up headlines.</p>
     </div>
     <div class="holo-status" id="holoStatus"></div>
+    <section class="holo-pop" id="holoPop" hidden aria-label="Headline spotlight" aria-live="polite"></section>
     <div class="holo-ticker" aria-label="High-impact headlines"><div class="tk"></div></div>`;
   ui.querySelector('.holo-tools').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.layer) { layers[b.dataset.layer] = !layers[b.dataset.layer]; b.setAttribute('aria-pressed', layers[b.dataset.layer]); FP.store.set('holoLayers', layers); dirty = true; }
     if (b.hasAttribute('data-holo-reset')) { cam.yaw = 0.55; cam.pitch = 0.42; cam.zoom = 1; dirty = true; }
     if (b.hasAttribute('data-holo-focus')) setFocus(!focus);
+    if (b.hasAttribute('data-holo-pop')) setPopups(!pop.on);
   });
+  pop.el = ui.querySelector('#holoPop');
+  pop.el.addEventListener('mouseenter', () => { pop.hold = true; });
+  pop.el.addEventListener('mouseleave', () => { pop.hold = false; });
+  pop.el.addEventListener('focusin', () => { pop.hold = true; });
+  pop.el.addEventListener('focusout', () => { pop.hold = false; });
+  pop.el.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.hasAttribute('data-pop-next')) showPop(1);
+    if (b.hasAttribute('data-pop-prev')) showPop(-1);
+    if (b.hasAttribute('data-pop-off')) { setPopups(false); FP.toast?.('Article pop-ups are off. Turn them back on from the top bar.'); }
+  });
+}
+function setPopups(on) {
+  pop.on = on; FP.store.set('holoPopups', on);
+  const b = ui.querySelector('[data-holo-pop]'); if (b) b.setAttribute('aria-pressed', on);
+  if (!on) { pop.cur = null; if (pop.el) pop.el.hidden = true; }
+  dirty = true;
+}
+function spotlight(o) {
+  const k = pop.queue.indexOf(o);
+  if (k >= 0) pop.i = k; else { pop.queue.splice(pop.i + 1, 0, o); pop.i++; }
+  pop.cur = o; pop.elapsed = 0; lastInteract = -1e9; renderPop(); dirty = true;
+}
+function showPop(dir) {
+  if (!pop.queue.length) return;
+  pop.i = (pop.i + dir + pop.queue.length) % pop.queue.length;
+  spotlight(pop.queue[pop.i]);
+}
+function renderPop() {
+  const o = pop.cur, el = pop.el;
+  if (!o || !el) return;
+  const n = o.n, { esc, ago, safeUrl } = FP;
+  const fx = Object.entries(n.effects || {}).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 6)
+    .map(([k, v]) => `<span class="${v > 0 ? 'u' : 'd'}">${esc(k)} ${v > 0 ? '▲' : '▼'}</span>`).join('');
+  const imp = { high: 'High impact', med: 'Medium impact', low: 'Low impact' }[n.impact];
+  el.innerHTML = `
+    <div class="pop-top"><span>${n.kind === 'breaking' ? '<span class="bulb"></span>Breaking' : esc(o.reg.name)}</span><span class="m">${pop.i + 1} of ${pop.queue.length}</span>
+      <button class="pop-x" data-pop-off aria-label="Turn off article pop-ups" title="Turn off article pop-ups">×</button></div>
+    <a class="pop-title" href="${esc(safeUrl(n.url))}" target="_blank" rel="noopener">${esc(n.title)}</a>
+    <div class="pop-meta"><span class="imp ${n.impact}">${imp}</span> ${esc(n.source)}${n.sources.length > 1 ? ` + ${n.sources.length - 1} more` : ''}, ${esc(ago(n.publishedAt))}</div>
+    ${fx ? `<div class="fx">${fx}</div>` : ''}
+    ${n.rules?.length ? `<div class="pop-why">Why it matters (analysis): ${esc(n.rules.join(', '))}</div>` : ''}
+    <div class="pop-nav">
+      <button class="chip" data-pop-prev>Previous</button>
+      <button class="chip" data-pop-next>Next</button>
+      <a class="chip" href="${esc(safeUrl(n.url))}" target="_blank" rel="noopener">Open article</a>
+    </div>
+    <div class="pop-bar" aria-hidden="true"><i></i></div>`;
+  el.hidden = false;
+}
+// Runs every frame: decides whether the card shows, auto-advances it, keeps the
+// globe turned toward the spotlighted headline, and remembers where the card is.
+function popTick(dt) {
+  const el = pop.el;
+  if (!el) return;
+  const active = pop.on && !FP.sheetOpen() && layers.news && pop.queue.length > 0 && !intro;
+  if (!active) { if (!el.hidden) el.hidden = true; pop.rect = null; return; }
+  if (!pop.cur) showPop(1);
+  if (el.hidden) renderPop();
+  if (!pop.hold && !reduce) pop.elapsed += dt;
+  if (pop.elapsed >= POP_SECONDS) showPop(1);
+  const bar = el.querySelector('.pop-bar i');
+  if (bar) bar.style.width = `${Math.min(100, (pop.elapsed / POP_SECONDS) * 100).toFixed(1)}%`;
+  pop.rect = el.getBoundingClientRect();
+  // turn the globe toward it, unless you've been steering in the last few seconds
+  if (pop.cur && !drag && T - lastInteract > 8) {
+    const w = rotY(pop.cur.p, spin);
+    const ty = Math.atan2(-w[0], w[2]);
+    const tp = clamp(Math.atan2(w[1], Math.hypot(w[0], w[2])) * 0.85 + 0.1, -0.15, 1.0);
+    let dy = ty - cam.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+    const k = reduce ? 1 : 1 - Math.exp(-dt * 2.4);
+    cam.yaw += dy * k; cam.pitch += (tp - cam.pitch) * k;
+    if (Math.abs(dy) > 0.002) dirty = true;
+  }
 }
 function setFocus(on) {
   focus = on;
@@ -804,6 +923,8 @@ window.addEventListener('keydown', (e) => {
   if (!enabled || e.metaKey || e.ctrlKey || e.altKey || /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName || '')) return;
   const k = e.key;
   if (k === 'f' || k === 'F') setFocus(!focus);
+  else if ((k === 'n' || k === 'N') && pop.on) { showPop(1); return; }
+  else if ((k === 'p' || k === 'P') && pop.on) { showPop(-1); return; }
   else if (k === 'ArrowLeft') cam.yaw -= 0.15;
   else if (k === 'ArrowRight') cam.yaw += 0.15;
   else if (k === 'ArrowUp') cam.pitch = clamp(cam.pitch - 0.1, -0.15, 1.15);
@@ -836,11 +957,12 @@ function loop(ts) {
   if (!reduce) {
     T += dt; spin += dt * 0.035;
     if (!drag) {
-      if (T - lastInteract > 6 && autoSpin) cam.yaw += dt * 0.045;
+      if (T - lastInteract > 6 && autoSpin && !(pop.on && pop.cur)) cam.yaw += dt * 0.045;
       else { cam.yaw += cam.vyaw; cam.vyaw *= 0.92; }
     }
   }
   if (intro && T - intro > 4.5) intro = null;
+  popTick(dt);
   layoutTarget();
   if (!reduce || dirty || Math.abs(tcx - cx) > 0.5) {
     draw(); dirty = false; frameNo++;

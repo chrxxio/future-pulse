@@ -2,7 +2,7 @@
 // Same-site files (page, scripts, data) are fetched from the network first so updates
 // show up right away; the cached copy is only used when the network fails.
 // Fonts are cached first, since they never change.
-const CACHE = 'fp-v3';
+const CACHE = 'fp-v4';
 const SHELL = ['./', './index.html', './holo.js', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {

@@ -12,7 +12,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write   # only used by the keep-alive step below
   pages: write
   id-token: write
 
@@ -23,18 +23,15 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v5
 
-      - name: Check Node
-        run: node --version
-
-      # state/ remembers headlines already seen, the calendar cache, alerts and
-      # the previous run (for level-cross / sentiment-change alerts).
+      # state/ remembers headlines already seen, cached price history, the calendar,
+      # alerts and the previous run (for level-cross / sentiment-change alerts).
       - name: Restore state
         uses: actions/cache/restore@v4
         with:
@@ -42,9 +39,36 @@ jobs:
           key: fp-state-${{ github.run_id }}
           restore-keys: fp-state-
 
+      # Prices sent by the price relay on your computer (scripts/relay.mjs), if it's
+      # running. Home internet connections get Yahoo's data normally; GitHub's servers
+      # often don't. Bundles older than 30 minutes are ignored.
+      - name: Use prices from your computer (price relay)
+        continue-on-error: true
+        run: |
+          if git ls-remote --exit-code --heads origin price-relay >/dev/null 2>&1; then
+            git fetch -q --depth=1 origin price-relay
+            mkdir -p state/prices
+            git show FETCH_HEAD:bundle.json.gz > state/relay.json.gz
+            node scripts/relay.mjs --unpack state/relay.json.gz state/prices
+          else
+            echo "No price relay set up (optional, see README)."
+          fi
+
+      # Yahoo and Stooq refuse many plain server requests (HTTP 429 / 403). This step
+      # connects the way Chrome does and gives up quickly if a site keeps refusing.
+      - name: Fetch prices (browser-style connection)
+        continue-on-error: true
+        run: |
+          python3 -m venv .venv && .venv/bin/pip install -q curl_cffi requests || python3 -m pip install -q --break-system-packages curl_cffi requests
+          PY=.venv/bin/python; [ -x "$PY" ] || PY=python3
+          mkdir -p state/prices
+          node scripts/price-plan.mjs > state/price-plan.json
+          "$PY" scripts/fetch_prices.py state/price-plan.json state/prices
+
       - name: Build market data
         run: node scripts/update.mjs
         env:
+          PRICE_CACHE_DIR: state/prices
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AI_MODEL: ${{ vars.AI_MODEL }}
           AI_INTERVAL_MINUTES: ${{ vars.AI_INTERVAL_MINUTES }}
@@ -65,3 +89,16 @@ jobs:
 
       - id: deployment
         uses: actions/deploy-pages@v5
+
+      # GitHub pauses scheduled workflows in public repos after 60 days with no
+      # repository activity. If the last commit is 50+ days old, commit a timestamp.
+      - name: Keep the schedule alive
+        if: github.event_name == 'schedule'
+        run: |
+          age=$(( $(date +%s) - $(git log -1 --format=%ct) ))
+          if [ "$age" -gt $(( 50 * 86400 )) ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            date -u +%FT%TZ > .github/keepalive
+            git add .github/keepalive && git commit -m "Keep scheduled updates active" && git push
+          fi

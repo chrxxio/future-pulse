@@ -23,6 +23,8 @@ On a phone it is a compact list. On a computer (browser window 1024px or wider) 
 | Gold lanterns near the globe | VIX, dollar index and the 10-year yield |
 | Shooting stars | Headlines that arrived in the latest update; markets whose sentiment flipped flash, and a level cross sets off sparks |
 
+**Article pop-ups**: a card in the bottom-right spotlights one headline at a time (high-impact and recent ones first, in a shuffled order). The globe turns to that headline's light and a glowing wire runs from it to the card; Previous / Next (or the **N** and **P** keys) step through them, hovering pauses the timer, and the *Article pop-ups* button or the card's × turns them off. Clicking a headline's light shows it in the card.
+
 Drag to turn it, scroll to zoom (or arrow keys and +/−), press **F** for a full-screen globe, space to pause the spin, hover any bulb for details, click a market for its level ladder, click a headline to open the article. Layer buttons turn each bulb type on or off, and *Phone layout* switches to the list view (the globe icon switches back). The globe pauses its animation when your system asks for reduced motion, and lowers its glow quality automatically on slower machines.
 
 There is no server to run. The app is a static page on GitHub Pages; the workflow redeploys it with fresh data.
@@ -32,7 +34,7 @@ There is no server to run. The app is a static page on GitHub Pages; the workflo
 ## Setup (about 5 minutes)
 
 1. **Create a public repository**, e.g. `futures-pulse`. Public is recommended. Pages on private repos needs a paid GitHub plan, and a 10-minute schedule uses far more than the 2,000 free Actions minutes a private repo gets each month. Public repos have no Actions minute limit on standard runners.
-2. **Upload these files** to the repo (keep the folder structure, including `.github/workflows/update.yml`). On a Mac, the `.github` folder is hidden in Finder; press <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>.</kbd> to show it before dragging. Alternatively, create the file in the GitHub web editor with the path `.github/workflows/update.yml`.
+2. **Upload these files** to the repo, keeping the folder structure. The workflow **must** end up at exactly `.github/workflows/update.yml`; GitHub ignores workflow files anywhere else. Web uploads often drop the hidden `.github` folder, so the safest way is: open `.github/workflows/update.yml` on GitHub (or *Add file → Create new file* and type that path), paste the contents, and commit. On a Mac, Finder hides `.github`; press <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>.</kbd> to show it.
 3. **Settings → Pages → Build and deployment → Source: GitHub Actions.**
 4. **Actions tab →** enable workflows if asked, open **update**, click **Run workflow**. The first run takes 1–2 minutes.
 5. Open `https://<your-username>.github.io/<repo>/` on your iPhone in Safari → **Share → Add to Home Screen**.
@@ -50,6 +52,27 @@ From then on it updates itself every 10 minutes Sunday–Friday and every 3 hour
 Secrets: *Settings → Secrets and variables → Actions → Secrets*. Variables: same page, *Variables* tab.
 
 ---
+
+## Price relay (reliable free prices)
+
+Yahoo and Stooq refuse many requests that come from GitHub's servers; the app then shows *HTTP 429* or *HTTP 403* instead of prices. The workflow tries a browser-style connection first, but whether that gets through changes from day to day. Home internet connections aren't treated that way, so the dependable free option is to let your own computer fetch the prices and hand them to the app. While the relay runs, the site also refreshes every 5 minutes instead of waiting for GitHub's schedule.
+
+**Setup (Windows, about 5 minutes)**
+
+1. Install [Node.js](https://nodejs.org) 18 or newer, then get this repository onto your computer (`git clone https://github.com/<you>/<repo>.git`, or *Code → Download ZIP* and extract it).
+2. Create a token: GitHub → *Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token*. Repository access: **only this repository**. Permissions: **Contents: Read and write** and **Actions: Read and write**.
+3. Save it in your home folder (not in the repo) as `C:\Users\<you>\.futures-pulse-relay.json`:
+   ```json
+   { "repo": "<you>/<repo>", "token": "github_pat_..." }
+   ```
+4. Test it from the repo folder: `node scripts/relay.mjs`. You should see `sent 27 series (full history, … KB), update started`; about two minutes later the app shows prices with *via Yahoo (your computer (relay))* in each market's details.
+5. Keep it running, either way:
+   - `npm run relay` in a terminal and leave the window open while you trade, or
+   - run once as administrator: `powershell -ExecutionPolicy Bypass -File scripts\relay-windows.ps1`. That starts it hidden in the background at every sign-in. Remove it with `Unregister-ScheduledTask -TaskName "Futures Pulse price relay" -Confirm:$false`.
+
+On a Mac or Linux box, add a cron entry instead: `*/5 * * * * cd ~/futures-pulse && /usr/local/bin/node scripts/relay.mjs >> ~/futures-pulse-relay.log 2>&1`.
+
+What it does: every 5 minutes it downloads the same Yahoo price history the app uses (the full history every 30 minutes, the latest bars in between, about 11–27 requests), uploads it as one compressed file to a `price-relay` branch (a single commit that is replaced each time, so the repository doesn't grow), and starts the update workflow. The workflow ignores relay data older than 30 minutes, so when your computer is off the app falls back to GitHub-side fetching and then to the last good prices, and says so. While futures are closed it checks only once an hour.
 
 ## Level codes
 
