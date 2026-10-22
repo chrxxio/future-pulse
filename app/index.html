@@ -723,10 +723,15 @@ function openSettings() {
 
     <h2 class="sec">Fresh data when you open the app</h2>
     <p class="muted" style="margin:0;font-size:14px">The page shows whatever the last update published; new prices only exist after an update runs on GitHub. GitHub's schedule runs about every 10 minutes when it's working, but it can run late. With a token saved here, opening or refreshing the app starts an update whenever the data is more than ${AUTO_AFTER_MIN} minutes old (at most once every ${COOLDOWN_MIN} minutes from this device). Create a fine-grained token limited to ${repo ? `<b>${esc(repo)}</b>` : 'this repository'} with <b>Actions: Read and write</b>. It is stored only on this device.</p>
+    <ol class="muted" style="font-size:14px;padding-left:20px;margin:10px 0 0">
+      <li><a class="btn sec" style="margin:4px 0" href="${esc(tokenUrl(repo || store.get('ghRepo', '')))}" target="_blank" rel="noopener">Create the token on GitHub</a><br>The form opens filled in. Under <b>Repository access</b> choose <b>Only select repositories</b> and pick <b>${esc(repo || 'this repository')}</b>, then <b>Generate token</b> and copy it.</li>
+      <li>Paste it below. It's saved on this device right away; do the same on each phone or computer you use.</li>
+    </ol>
     <label style="display:flex;gap:10px;align-items:center;color:var(--text);font-size:14px"><input type="checkbox" id="autoUpd" style="width:auto" ${store.get('autoUpdate', true) ? 'checked' : ''}> Start an update automatically when the data is stale</label>
     <label for="tok">GitHub token</label><input id="tok" type="password" autocomplete="off" placeholder="github_pat_…" value="${esc(store.get('ghToken', ''))}">
     <label for="repo">Repository</label><input id="repo" value="${esc(store.get('ghRepo', repo))}" placeholder="owner/repo">
     <button class="btn" id="runNow">Start update</button> <button class="btn sec" id="forget">Remove token</button>
+    <p class="muted" style="font-size:13px;margin:8px 0 0">${store.get('ghToken', '') ? 'A token is saved on this device.' : 'No token saved on this device yet.'} Never put the token in the repository: it's public.</p>
 
     <h2 class="sec">Price relay</h2>
     <p class="muted" style="margin:0;font-size:14px">${d.relay?.used ? `Prices are coming from your computer (sent ${d.relay.ageMin} min before this update).` : d.relay ? `Your computer last sent prices ${d.relay.ageMin} min before this update, too old to use. Is the relay running?` : 'Not set up. GitHub’s servers are often refused by free price sites; running the small relay on your computer fixes that. See the README, “Price relay”.'}</p>
@@ -754,6 +759,14 @@ async function runNow() {
   store.set('ghToken', tok); store.set('ghRepo', repo);
   const res = await startUpdate();
   toast(res.ok ? (res.already ? 'An update is already running. New data in about a minute.' : 'Update started. New data usually lands in 1–2 minutes.') : res.why);
+}
+
+// GitHub's documented URL parameters pre-fill the fine-grained token form.
+function tokenUrl(repo) {
+  const owner = (repo || '').split('/')[0];
+  const q = new URLSearchParams({ name: 'Futures Pulse app', description: 'Lets the Futures Pulse app start price updates', expires_in: '366', actions: 'write' });
+  if (owner) q.set('target_name', owner);
+  return `https://github.com/settings/personal-access-tokens/new?${q}`;
 }
 
 // ---------- updates on demand ----------
@@ -850,6 +863,13 @@ document.addEventListener('click', (e) => {
   if (t.id === 'forget') { store.set('ghToken', ''); $('#tok').value = ''; toast('Token removed from this phone'); return; }
 });
 document.addEventListener('change', (e) => {
+  if (e.target.id === 'tok' || e.target.id === 'repo') {
+    const tok = $('#tok')?.value.trim() || '', repo = $('#repo')?.value.trim() || '';
+    if (e.target.id === 'tok') { store.set('ghToken', tok); toast(tok ? 'Token saved on this device' : 'Token removed from this device'); }
+    if (/^[\w.-]+\/[\w.-]+$/.test(repo)) store.set('ghRepo', repo);
+    if (tok) maybeAutoUpdate();
+    return;
+  }
   if (e.target.id === 'autoUpd') { store.set('autoUpdate', e.target.checked); toast(e.target.checked ? 'Stale data will start an update when you open the app' : 'Automatic updates from this device are off'); return; }
   if (e.target.id === 'themeSel') {
     const v = e.target.value; store.set('theme', v);
