@@ -1,0 +1,14 @@
+{
+  "name": "futures-pulse",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Phone app (GitHub Pages) with live support/resistance levels, sentiment and market-moving news for CME micro futures.",
+  "type": "module",
+  "engines": { "node": ">=18.17" },
+  "scripts": {
+    "update": "node scripts/update.mjs",
+    "sample": "node scripts/sample.mjs",
+    "serve": "python3 -m http.server 8080 --directory dist",
+    "test": "node scripts/test.mjs"
+  }
+}
