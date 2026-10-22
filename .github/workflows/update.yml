@@ -5,7 +5,7 @@ name: update
 # offset from the top of the hour.
 on:
   schedule:
-    - cron: '3-59/10 * * * 0-5'   # Sun–Fri, every 10 minutes
+    - cron: '7,17,27,37,47,57 * * * 0-5'   # Sun–Fri, every 10 minutes
     - cron: '17 */3 * * 6'        # Saturday, every 3 hours (news only — futures are closed)
   workflow_dispatch:              # "Run workflow" button, and the app's "Start update"
   push:

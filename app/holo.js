@@ -900,14 +900,14 @@ function setFocus(on) {
   if (b) { b.setAttribute('aria-pressed', on); b.textContent = on ? 'Show panels' : 'Full screen'; }
   dirty = true;
 }
-// When is the next scheduled run? (cron: minute 3,13,...,53 Sun–Fri UTC; Sat every 3h at :17)
+// When is the next scheduled run? (cron: minute 7,17,...,57 Sun–Fri UTC; Sat every 3h at :17)
 function nextRun(now = new Date()) {
   const t = new Date(now.getTime());
   t.setUTCSeconds(0, 0);
   for (let i = 0; i < 60 * 24 * 2; i++) {
     t.setUTCMinutes(t.getUTCMinutes() + 1);
     const d = t.getUTCDay(), m = t.getUTCMinutes(), h = t.getUTCHours();
-    if (d <= 5 && m % 10 === 3) return t;
+    if (d <= 5 && m % 10 === 7) return t;
     if (d === 6 && m === 17 && h % 3 === 0) return t;
   }
   return null;
@@ -916,7 +916,8 @@ function status() {
   const el = document.getElementById('holoStatus'); const d = FP.data;
   if (!el || !d) return;
   const n = nextRun();
-  el.innerHTML = `<b>Updated ${FP.esc(FP.ago(d.generatedAt))}</b>. Next scheduled update around ${n ? FP.etTime(n.toISOString()) + ' ET' : 'soon'}; GitHub sometimes starts it late. The page checks for new data every minute, and new headlines streak in when it lands.`;
+  const tok = !!FP.store.get('ghToken', '');
+  el.innerHTML = `<b>Updated ${FP.esc(FP.ago(d.generatedAt))}</b>. Next scheduled update around ${n ? FP.etTime(n.toISOString()) + ' ET' : 'soon'}; GitHub sometimes starts it late. ${tok ? 'Opening or refreshing the page starts one when the data is over 8 minutes old.' : 'Add a token in Settings and opening the page will start one when the data is stale.'} New headlines streak in when fresh data lands.`;
 }
 setInterval(() => { if (enabled) status(); }, 15000);
 window.addEventListener('keydown', (e) => {

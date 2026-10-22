@@ -69,6 +69,9 @@ header.top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--b
 .fresh{display:inline-flex;align-items:center;gap:6px;font-size:13px;padding:6px 10px;border-radius:999px;background:var(--panel2);white-space:nowrap;flex:none}
 .fresh i{width:8px;height:8px;border-radius:50%;background:var(--bull)}
 .fresh.aging i{background:var(--brass)} .fresh.stale i{background:var(--bear)}
+.fresh.updating i{background:var(--tape);animation:pulse 1s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25;transform:scale(.7)}}
+@media (prefers-reduced-motion: reduce){.fresh.updating i{animation:none}}
 .iconbtn{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;background:var(--panel2)}
 .iconbtn svg{width:18px;height:18px}
 .spin svg{animation:spin 1s linear infinite}
@@ -312,7 +315,7 @@ body.holo.sheet-open .holo-tools .chip[data-layer]{display:none}
       <button class="iconbtn layout-btn" data-layout="holo" aria-label="Switch to globe view" title="Globe view">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8"/><ellipse cx="12" cy="12" rx="3.5" ry="8"/><path d="M4 12h16"/></svg>
       </button>
-      <button class="iconbtn" id="refresh" aria-label="Reload data">
+      <button class="iconbtn" id="refresh" aria-label="Refresh: load the newest data, or start an update if it's stale" title="Refresh">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
       </button>
       <button class="iconbtn" id="gear" aria-label="Settings">
@@ -404,7 +407,7 @@ async function load(quiet) {
     else if (!quiet) toast('Offline — showing the last data received');
   } finally {
     S.loading = false;
-    $('#refresh').classList.remove('spin');
+    if (!S.spinHold) $('#refresh').classList.remove('spin');
   }
 }
 
@@ -413,8 +416,8 @@ function renderHeader() {
   const d = S.data; if (!d) return;
   const age = (Date.now() - Date.parse(d.generatedAt)) / 60000;
   const f = $('#fresh');
-  f.className = 'fresh' + (age > 40 ? ' stale' : age > 15 ? ' aging' : '');
-  f.querySelector('span').textContent = ago(d.generatedAt);
+  if (U.running) { f.className = 'fresh updating'; f.querySelector('span').textContent = 'Updating…'; }
+  else { f.className = 'fresh' + (age > 40 ? ' stale' : age > 15 ? ' aging' : ''); f.querySelector('span').textContent = ago(d.generatedAt); }
   $('#mkt').textContent = `${d.market?.label || ''}, ${etTime(d.generatedAt)} ET`;
   $('#macro').innerHTML = (d.macro || []).filter((m) => !m.error).map((m) => {
     const isY = m.id === 'US10Y';
@@ -718,8 +721,9 @@ function openSettings() {
     <h2 class="sec">Appearance</h2>
     <select id="themeSel"><option value="auto">Match my phone</option><option value="dark">Dark</option><option value="light">Light</option></select>
 
-    <h2 class="sec">Run an update now</h2>
-    <p class="muted" style="margin:0;font-size:14px">GitHub runs updates about every 10 minutes and sometimes runs late. With a token you can start one from here. Create a fine-grained token limited to ${repo ? `<b>${esc(repo)}</b>` : 'this repository'} with <b>Actions: Read and write</b>. It is stored only on this phone.</p>
+    <h2 class="sec">Fresh data when you open the app</h2>
+    <p class="muted" style="margin:0;font-size:14px">The page shows whatever the last update published; new prices only exist after an update runs on GitHub. GitHub's schedule runs about every 10 minutes when it's working, but it can run late. With a token saved here, opening or refreshing the app starts an update whenever the data is more than ${AUTO_AFTER_MIN} minutes old (at most once every ${COOLDOWN_MIN} minutes from this device). Create a fine-grained token limited to ${repo ? `<b>${esc(repo)}</b>` : 'this repository'} with <b>Actions: Read and write</b>. It is stored only on this device.</p>
+    <label style="display:flex;gap:10px;align-items:center;color:var(--text);font-size:14px"><input type="checkbox" id="autoUpd" style="width:auto" ${store.get('autoUpdate', true) ? 'checked' : ''}> Start an update automatically when the data is stale</label>
     <label for="tok">GitHub token</label><input id="tok" type="password" autocomplete="off" placeholder="github_pat_…" value="${esc(store.get('ghToken', ''))}">
     <label for="repo">Repository</label><input id="repo" value="${esc(store.get('ghRepo', repo))}" placeholder="owner/repo">
     <button class="btn" id="runNow">Start update</button> <button class="btn sec" id="forget">Remove token</button>
@@ -748,21 +752,81 @@ async function runNow() {
   const tok = $('#tok').value.trim(), repo = $('#repo').value.trim();
   if (!tok || !/^[\w.-]+\/[\w.-]+$/.test(repo)) { toast('Add a token and the repository as owner/repo'); return; }
   store.set('ghToken', tok); store.set('ghRepo', repo);
+  const res = await startUpdate();
+  toast(res.ok ? (res.already ? 'An update is already running. New data in about a minute.' : 'Update started. New data usually lands in 1–2 minutes.') : res.why);
+}
+
+// ---------- updates on demand ----------
+// The page can't fetch prices itself (price sites don't allow it from a browser), so
+// "fresh data" means asking GitHub to run the update job. With a saved token, opening
+// or refreshing the app does that when the data is stale, with a cooldown so a burst
+// of refreshes doesn't turn into a burst of runs (and requests to Yahoo).
+const AUTO_AFTER_MIN = 8;
+const COOLDOWN_MIN = 5;
+const U = { running: false, since: 0, before: null, timer: 0 };
+const ghRepo = () => store.get('ghRepo', '') || S.data?.repo || '';
+const ghToken = () => store.get('ghToken', '');
+const dataAgeMin = () => (S.data ? (Date.now() - Date.parse(S.data.generatedAt)) / 60000 : Infinity);
+function ghApi(route, opts = {}) {
+  const tok = ghToken();
+  return fetch(`https://api.github.com/repos/${ghRepo()}${route}`, {
+    ...opts,
+    headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', ...(tok ? { Authorization: `Bearer ${tok}` } : {}) },
+  });
+}
+async function activeRun() {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(ghRepo())) return null;
   try {
-    const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/update.yml/dispatches`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${tok}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
-      body: JSON.stringify({ ref: S.data?.ref || 'main' }),
-    });
-    if (r.status === 204) {
-      toast('Update started. New data usually lands in 1–3 minutes.');
-      const before = S.data?.generatedAt; let n = 0;
-      const iv = setInterval(async () => { n++; await load(true); if (S.data?.generatedAt !== before || n > 12) { clearInterval(iv); if (S.data?.generatedAt !== before) toast('New data loaded'); } }, 20000);
-    } else {
-      const j = await r.json().catch(() => ({}));
-      toast(`GitHub said ${r.status}: ${j.message || 'request refused'}`);
-    }
-  } catch (e) { toast('Could not reach GitHub: ' + e.message); }
+    const r = await ghApi('/actions/runs?per_page=5');
+    if (!r.ok) return null;
+    return ((await r.json()).workflow_runs || []).find((w) => w.status !== 'completed') || null;
+  } catch { return null; }
+}
+async function startUpdate() {
+  if (!ghToken() || !/^[\w.-]+\/[\w.-]+$/.test(ghRepo())) return { ok: false, why: 'Add a GitHub token in Settings to start updates from here.' };
+  try {
+    if (await activeRun()) { watchUpdate(); return { ok: true, already: true }; }
+    const r = await ghApi('/actions/workflows/update.yml/dispatches', { method: 'POST', body: JSON.stringify({ ref: S.data?.ref || 'main' }) });
+    if (r.status === 204) { store.set('lastTrigger', Date.now()); watchUpdate(); return { ok: true }; }
+    const j = await r.json().catch(() => ({}));
+    return { ok: false, why: `GitHub said ${r.status}: ${j.message || 'request refused'}${r.status === 401 || r.status === 403 ? '. Check the token in Settings.' : ''}` };
+  } catch (e) { return { ok: false, why: 'Could not reach GitHub: ' + e.message }; }
+}
+function watchUpdate() {
+  if (U.running) return;
+  U.running = true; U.since = Date.now(); U.before = S.data?.generatedAt;
+  renderHeader();
+  clearInterval(U.timer);
+  U.timer = setInterval(async () => {
+    await load(true);
+    if (S.data?.generatedAt !== U.before) { stopWatch(); toast(`New data loaded (${etTime(S.data.generatedAt)} ET)`); }
+    else if (Date.now() - U.since > 6 * 60e3) { stopWatch(); toast('The update is taking longer than usual; GitHub may be busy. The page will show it when it lands.'); }
+  }, 15000);
+}
+function stopWatch() { U.running = false; clearInterval(U.timer); renderHeader(); }
+async function maybeAutoUpdate() {
+  if (!store.get('autoUpdate', true) || !ghToken() || U.running) return;
+  if (dataAgeMin() < AUTO_AFTER_MIN) return;
+  if (Date.now() - store.get('lastTrigger', 0) < COOLDOWN_MIN * 60e3) return;
+  const age = Math.round(dataAgeMin());
+  const res = await startUpdate();
+  if (res.ok) toast(res.already ? 'An update is already running. New data in about a minute.' : `Data was ${age} min old, so an update started. New data in 1–2 minutes.`);
+}
+async function refreshNow() {
+  const t0 = Date.now(), before = S.data?.generatedAt;
+  S.spinHold = true; $('#refresh').classList.add('spin');
+  await load(true);
+  const run = U.running ? null : await activeRun();
+  const wait = 700 - (Date.now() - t0); if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  S.spinHold = false; $('#refresh').classList.remove('spin');
+  if (S.data?.generatedAt !== before) { toast(`New data loaded (${etTime(S.data.generatedAt)} ET)`); return; }
+  if (U.running || run) { watchUpdate(); toast('An update is running. New data in about a minute.'); return; }
+  const age = Math.round(dataAgeMin());
+  if (!ghToken()) { toast(`You have the latest published data (${age} min old). To get fresh prices on demand, add a GitHub token in Settings.`); return; }
+  if (age < 2) { toast('You already have the newest data.'); return; }
+  if (Date.now() - store.get('lastTrigger', 0) < 60e3) { toast('An update was just started. New data in about a minute.'); return; }
+  const res = await startUpdate();
+  toast(res.ok ? (res.already ? 'An update is already running. New data in about a minute.' : `Data was ${age} min old, so an update started. New data in 1–2 minutes.`) : res.why);
 }
 
 // ---------- events ----------
@@ -780,12 +844,13 @@ document.addEventListener('click', (e) => {
     t.setAttribute('aria-expanded', S.open.has(k)); return;
   }
   if (t.dataset.layout) { store.set('layout', t.dataset.layout); applyLayout(); return; }
-  if (t.id === 'refresh') { load(); return; }
+  if (t.id === 'refresh') { refreshNow(); return; }
   if (t.id === 'gear') { openSettings(); return; }
   if (t.id === 'runNow') { runNow(); return; }
   if (t.id === 'forget') { store.set('ghToken', ''); $('#tok').value = ''; toast('Token removed from this phone'); return; }
 });
 document.addEventListener('change', (e) => {
+  if (e.target.id === 'autoUpd') { store.set('autoUpdate', e.target.checked); toast(e.target.checked ? 'Stale data will start an update when you open the app' : 'Automatic updates from this device are off'); return; }
   if (e.target.id === 'themeSel') {
     const v = e.target.value; store.set('theme', v);
     if (v === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v;
@@ -796,7 +861,7 @@ window.addEventListener('popstate', () => {
   if (!h) closeDetail(true);
   else if (S.data?.instruments.some((i) => i.id === h)) openDetail(h, false);
 });
-document.addEventListener('visibilitychange', () => { if (!document.hidden) load(true); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(true).then(maybeAutoUpdate); });
 setInterval(() => { if (!document.hidden) load(true); }, 60000);
 setInterval(() => { if (!document.hidden) renderHeader(); }, 30000);
 
@@ -819,6 +884,7 @@ window.FP = {
 applyLayout();
 
 load().then(() => {
+  maybeAutoUpdate();
   const h = location.hash.slice(1);
   if (h && S.data?.instruments.some((i) => i.id === h)) { history.replaceState(null, '', location.pathname); openDetail(h); }
 });

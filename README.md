@@ -47,11 +47,22 @@ From then on it updates itself every 10 minutes Sunday–Friday and every 3 hour
 |---|---|
 | **AI write-ups** per market (why each key level matters right now, bull/bear case, what to watch) | Add the repository secret `ANTHROPIC_API_KEY`. The default model is `claude-haiku-5-5`, refreshed every 30 min (sooner when sentiment flips or a new high-impact story lands). Override with repository variables `AI_MODEL` and `AI_INTERVAL_MINUTES`. The model only sees this run's numbers and headlines and cites headlines by id. The app links each citation to its article. |
 | **Push notifications** | Install the free **ntfy** app, subscribe to a hard-to-guess topic name, and add it as secret `NTFY_TOPIC`. A `DISCORD_WEBHOOK_URL` secret works too. Variable `PUSH_MIN_PRIORITY` (default 4): 5 = breaking headlines only, 4 adds strong level crosses, sentiment flips and releases 30 minutes out, 3 adds all level crosses. |
-| **"Start update" button in the app** | Settings (gear) → paste a fine-grained GitHub token limited to this repo with **Actions: Read and write**. It is stored only in your phone's browser. Useful when GitHub runs the schedule late. |
+| **Updates when you open the app** | Settings (gear) → paste a fine-grained GitHub token limited to this repo with **Actions: Read and write**. It is stored only in that browser. Stale data then starts an update when you open or refresh the app; *Start update* runs one right away. |
 
 Secrets: *Settings → Secrets and variables → Actions → Secrets*. Variables: same page, *Variables* tab.
 
 ---
+
+## How fresh is the data?
+
+Refreshing the page loads the newest data the update job has **published**; the page can't fetch prices itself, because price sites don't allow requests straight from a browser. New data appears whenever the job runs, which happens in four ways:
+
+- **GitHub's schedule**, every 10 minutes Sunday–Friday. GitHub can start these late, and on a brand-new repository it can take a while before the schedule starts firing at all.
+- **Opening or refreshing the app**, once you save a GitHub token in Settings (*Fresh data when you open the app*). If the data is more than 8 minutes old it starts an update, at most once every 5 minutes from that device, and the header shows *Updating…* until the new data lands. The refresh button does the same and tells you what it did.
+- **The price relay** on your computer, every 5 minutes (below).
+- **Actions → update → Run workflow** on GitHub. Use *Run workflow*, not *Re-run*: re-running repeats an old run with the code it had at the time.
+
+Cost of an update: one GitHub API call from your device, one job of about a minute (free on public repositories), and 11–27 requests to Yahoo. GitHub allows 5,000 API requests an hour per token, so the limit that matters is how many requests Yahoo accepts from GitHub's servers; the cooldown keeps that down, and the relay avoids it.
 
 ## Price relay (reliable free prices)
 
