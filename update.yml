@@ -1,0 +1,67 @@
+name: update
+
+# Rebuilds levels, sentiment and news, then publishes the app to GitHub Pages.
+# Times are UTC. GitHub may start scheduled runs late under load, so runs are
+# offset from the top of the hour.
+on:
+  schedule:
+    - cron: '3-59/10 * * * 0-5'   # Sun–Fri, every 10 minutes
+    - cron: '17 */3 * * 6'        # Saturday, every 3 hours (news only — futures are closed)
+  workflow_dispatch:              # "Run workflow" button, and the app's "Start update"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check Node
+        run: node --version
+
+      # state/ remembers headlines already seen, the calendar cache, alerts and
+      # the previous run (for level-cross / sentiment-change alerts).
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: fp-state-${{ github.run_id }}
+          restore-keys: fp-state-
+
+      - name: Build market data
+        run: node scripts/update.mjs
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
+          AI_INTERVAL_MINUTES: ${{ vars.AI_INTERVAL_MINUTES }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PUSH_MIN_PRIORITY: ${{ vars.PUSH_MIN_PRIORITY }}
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: fp-state-${{ github.run_id }}
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+
+      - id: deployment
+        uses: actions/deploy-pages@v5
