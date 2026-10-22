@@ -4,6 +4,8 @@
 //   Fairy lights on the globe  = headlines, grouped by region (blinking = breaking)
 //   Beams                       = which markets a headline moves
 //   Outer light string          = scheduled releases on a 24-hour clock (blue = high impact)
+//   Lanterns near the globe     = VIX, dollar index, 10-year yield
+//   Shooting stars              = headlines that arrived in the latest update
 (() => {
 'use strict';
 const FP = window.FP;
@@ -35,6 +37,12 @@ let cyw = 1, syw = 0, cpt = 1, spt = 0;
 let enabled = false, raf = 0, last = 0, T = 0, spin = 0, lastInteract = -1e9, dirty = true;
 // adaptive quality: 2 = bloom every frame, 1 = bloom refreshed every 3rd frame, 0 = no bloom + lower resolution
 let quality = 2, frameNo = 0, costAvg = 0;
+let intro = null, introDone = false, focus = false, autoSpin = true;
+const bursts = [];
+let prevGen = null, prevNewsIds = null, prevLabels = {};
+const ease = (u) => (u <= 0 ? 0 : u >= 1 ? 1 : 1 - Math.pow(1 - u, 3));
+// power-on: everything lights up in sequence the first time the globe opens
+const lit = (delay) => (intro ? clamp((T - intro - delay) / 0.35, 0, 1) : 1);
 
 function resize() {
   DPR = Math.min(quality === 0 ? 1.25 : 2, window.devicePixelRatio || 1);
@@ -51,7 +59,8 @@ function layoutTarget() {
   const avail = Math.max(320, Math.min(W - left - right - 40, H - 120));
   tcx = left + (W - left - right) / 2;
   cy = H * 0.5 - 10;
-  F = avail * 0.19 * D * cam.zoom;
+  const dolly = intro ? 0.5 + 0.5 * ease((T - intro) / 2.4) : 1;
+  F = avail * (focus ? 0.21 : 0.19) * D * cam.zoom * dolly;
 }
 function setCam() { cyw = Math.cos(cam.yaw); syw = Math.sin(cam.yaw); cpt = Math.cos(cam.pitch); spt = Math.sin(cam.pitch); }
 function view(p) {
@@ -100,6 +109,12 @@ const RINGS = [
   { r: 2.16, tilt: 0.46, node: 2.4, speed: 0.021, phase: 2.4, groups: ['oil', 'crypto'] },
 ];
 const CAL_R = 2.55;
+const MACRO_RING = { r: 1.22, tilt: 0.16, node: 0.7, speed: 0.07 };
+const MACRO_NOTE = {
+  VIX: 'Higher means more fear, which the model reads as a headwind for index futures.',
+  DXY: 'A stronger dollar is usually a headwind for gold, silver and crude.',
+  US10Y: 'Rising yields usually weigh on the Nasdaq and on gold.',
+};
 const ringPt = (ring, th) => rotY(rotX([ring.r * Math.cos(th), 0, ring.r * Math.sin(th)], ring.tilt), ring.node);
 const calPt = (th) => [CAL_R * Math.cos(th), 0, CAL_R * Math.sin(th)];
 const NOW_TH = Math.PI / 2;
@@ -107,7 +122,7 @@ const NOW_TH = Math.PI / 2;
 // ---------- scene from data ----------
 let scene = { planets: [], news: [], events: [], beams: [], meanScore: 0 };
 let selected = null, hover = null, hits = [];
-const layers = Object.assign({ markets: true, levels: true, news: true, beams: true, calendar: true }, FP.store.get('holoLayers', {}));
+const layers = Object.assign({ markets: true, levels: true, news: true, beams: true, calendar: true, macro: true }, FP.store.get('holoLayers', {}));
 
 function regionOf(n) {
   const r = (n.rules || []).join(' ');
@@ -161,13 +176,43 @@ function setData(d) {
     e, th: NOW_TH - (e.minutesAway / 1440) * TAU, high: e.impact === 'High', past: e.minutesAway < 0,
   }));
   const scores = planets.map((p) => p.score);
-  scene = { planets, news, events, beams, meanScore: scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0 };
+  const macro = (d.macro || []).filter((m) => !m.error && Number.isFinite(m.price)).map((m, k) => ({ m, th0: (k / 3) * TAU }));
+  // What changed since the last update? New headlines fly in, flipped markets flash,
+  // level crosses set off a little burst of sparks.
+  const isUpdate = prevGen && prevGen !== d.generatedAt && !reduce;
+  if (isUpdate) {
+    let k = 0;
+    for (const o of news) if (!prevNewsIds.has(o.n.id)) { o.arrive = T + 0.4 + (k++ % 12) * 0.35; o.newUntil = o.arrive + 40; }
+    for (const pl of planets) if (prevLabels[pl.id] && prevLabels[pl.id] !== pl.inst.sentiment?.label) pl.flash = T + 0.5;
+    for (const a of d.alerts || []) {
+      if (a.type !== 'cross' || a.time <= prevGen) continue;
+      const pl = planets.find((x) => x.id === a.instrument);
+      if (pl) bursts.push({ pl, t0: T + 0.8 + Math.random(), up: a.direction === 'up', seed: Math.random() * 1000 });
+    }
+  }
+  prevGen = d.generatedAt;
+  prevNewsIds = new Set(news.map((o) => o.n.id));
+  prevLabels = Object.fromEntries(planets.map((p) => [p.id, p.inst.sentiment?.label]));
+  scene = { planets, news, events, beams, macro, meanScore: scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0 };
   ticker(d);
+  status();
   dirty = true;
 }
 
 // ---------- background ----------
 let starCanvas = null;
+const BOKEH = Array.from({ length: 34 }, (_, i) => ({
+  x: hashN('bx' + i), y: hashN('by' + i), r: 12 + hashN('br' + i) * 44, depth: 0.3 + hashN('bd' + i) * 0.9,
+  c: [C.amber, C.red, C.green, C.gold, C.blue, C.amber][Math.floor(hashN('bc' + i) * 6)], a: 0.025 + hashN('ba' + i) * 0.05,
+  vx: (hashN('bv' + i) - 0.5) * 6, vy: -2 - hashN('bw' + i) * 5, ph: hashN('bp' + i) * TAU,
+}));
+function drawBokeh() {
+  for (const b of BOKEH) {
+    const x = ((b.x * W + T * b.vx - cam.yaw * 40 * b.depth) % (W + 160) + W + 160) % (W + 160) - 80;
+    const y = ((b.y * H + T * b.vy + cam.pitch * 30 * b.depth) % (H + 160) + H + 160) % (H + 160) - 80;
+    stamp('bokeh', x, y, b.r, b.c, b.a * (reduce ? 1 : 0.75 + 0.25 * Math.sin(T * 0.5 + b.ph)) * lit(0));
+  }
+}
 function makeStars() {
   starCanvas = document.createElement('canvas');
   starCanvas.width = Math.round(W * DPR); starCanvas.height = Math.round(H * DPR);
@@ -188,10 +233,23 @@ function sprite(kind, c) {
   if (s) return s;
   s = document.createElement('canvas'); s.width = s.height = 128;
   const g2 = s.getContext('2d');
-  const g = kind === 'halo'
+  const g = kind !== 'glass'
     ? g2.createRadialGradient(64, 64, 0, 64, 64, 64)
     : g2.createRadialGradient(52, 52, 0, 64, 64, 64);
-  if (kind === 'halo') { g.addColorStop(0, rgba(c, 0.62)); g.addColorStop(0.22, rgba(c, 0.26)); g.addColorStop(0.55, rgba(c, 0.07)); g.addColorStop(1, rgba(c, 0)); }
+  if (kind === 'star') {
+    // star-filter streaks, like photographing string lights through a cross filter
+    g2.globalCompositeOperation = 'lighter';
+    for (const [ang, len, w] of [[0, 64, 2.4], [Math.PI / 2, 64, 2.4], [Math.PI / 4, 34, 1.4], [-Math.PI / 4, 34, 1.4]]) {
+      g2.save(); g2.translate(64, 64); g2.rotate(ang);
+      const lg = g2.createLinearGradient(-len, 0, len, 0);
+      lg.addColorStop(0, rgba(c, 0)); lg.addColorStop(0.5, 'rgba(255,248,230,0.95)'); lg.addColorStop(1, rgba(c, 0));
+      g2.fillStyle = lg; g2.fillRect(-len, -w / 2, len * 2, w); g2.restore();
+    }
+    SPR.set(key, s);
+    return s;
+  }
+  if (kind === 'bokeh') { g.addColorStop(0, rgba(c, 0.5)); g.addColorStop(0.72, rgba(c, 0.42)); g.addColorStop(0.9, rgba(c, 0.62)); g.addColorStop(1, rgba(c, 0)); }
+  else if (kind === 'halo') { g.addColorStop(0, rgba(c, 0.62)); g.addColorStop(0.22, rgba(c, 0.26)); g.addColorStop(0.55, rgba(c, 0.07)); g.addColorStop(1, rgba(c, 0)); }
   else { g.addColorStop(0, 'rgba(255,250,235,1)'); g.addColorStop(0.45, rgba(c, 1)); g.addColorStop(0.98, rgba(c.map((v) => v * 0.55), 1)); g.addColorStop(1, rgba(c, 0)); }
   g2.fillStyle = g; g2.fillRect(0, 0, 128, 128);
   SPR.set(key, s);
@@ -200,6 +258,13 @@ function sprite(kind, c) {
 function halo(x, y, r, c, a) {
   if (a <= 0.01 || r < 0.5) return;
   ctx.globalAlpha = Math.min(1, a); ctx.drawImage(sprite('halo', c), x - r, y - r, r * 2, r * 2); ctx.globalAlpha = 1;
+}
+function stamp(kind, x, y, r, c, a, rot = 0) {
+  if (a <= 0.01 || r < 0.5) return;
+  ctx.globalAlpha = Math.min(1, a);
+  if (rot) { ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.drawImage(sprite(kind, c), -r, -r, r * 2, r * 2); ctx.restore(); }
+  else ctx.drawImage(sprite(kind, c), x - r, y - r, r * 2, r * 2);
+  ctx.globalAlpha = 1;
 }
 function miniBulb(x, y, r, c, a) {
   if (a <= 0.01) return;
@@ -261,17 +326,27 @@ function draw() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   hits = [];
   const g0 = (p) => rotY(p, spin);
+  ctx.globalCompositeOperation = 'lighter';
+  drawBokeh();
+  ctx.globalCompositeOperation = 'source-over';
 
   // warm core
   const coreC = scene.meanScore >= 15 ? C.green : scene.meanScore <= -15 ? C.red : C.amber;
   const R0 = F / D;
-  halo(cx, cy, R0 * 0.95, coreC, 0.28 + (reduce ? 0 : 0.05 * Math.sin(T * 1.3)));
+  halo(cx, cy, R0 * 0.95, coreC, (0.28 + (reduce ? 0 : 0.05 * Math.sin(T * 1.3))) * lit(0.2));
+  // atmosphere: a warm rim around the globe
+  {
+    const g = ctx.createRadialGradient(cx, cy, R0 * 0.9, cx, cy, R0 * 1.32);
+    g.addColorStop(0, rgba(C.amber, 0)); g.addColorStop(0.22, rgba(C.amber, 0.13 * lit(0.1))); g.addColorStop(1, rgba(C.amber, 0));
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R0 * 1.32, 0, TAU); ctx.fill();
+  }
 
   // globe wires
   for (const L of LINES) {
     const pts = L.pts.map((p) => proj(g0(p)));
     let run = [], fr = null;
-    const flush = () => { if (run.length > 1) strokePath(run, rgba(C.wire, fr ? (L.eq ? 0.32 : 0.17) : 0.055), L.eq ? 1.2 : 0.9); };
+    const la = lit(0);
+    const flush = () => { if (run.length > 1) strokePath(run, rgba(C.wire, (fr ? (L.eq ? 0.32 : 0.17) : 0.055) * la), L.eq ? 1.2 : 0.9); };
     for (const P of pts) { const f = P.z >= 0; if (fr === null) fr = f; if (f !== fr) { run.push(P); flush(); run = [P]; fr = f; } else run.push(P); }
     flush();
   }
@@ -284,15 +359,17 @@ function draw() {
   }
 
   // orbit strings + calendar string
-  if (layers.markets) for (const ring of RINGS) drawWireCircle((t) => ringPt(ring, t), 120, 0.2, 0.07, 1.1);
-  if (layers.calendar) drawWireCircle(calPt, 160, 0.24, 0.08, 1.2);
+  const sl = lit(0.6);
+  if (layers.markets) for (const ring of RINGS) drawWireCircle((t) => ringPt(ring, t), 120, 0.2 * sl, 0.07 * sl, 1.1);
+  if (layers.calendar) drawWireCircle(calPt, 160, 0.24 * sl, 0.08 * sl, 1.2);
+  if (layers.macro && scene.macro?.length) drawWireCircle((t) => rotY(rotX([MACRO_RING.r * Math.cos(t), 0, MACRO_RING.r * Math.sin(t)], MACRO_RING.tilt), MACRO_RING.node), 90, 0.14 * sl, 0.05 * sl, 0.8);
 
   ctx.globalCompositeOperation = 'lighter';
   // fairy lights (globe texture)
   for (const f of FAIRY) {
     const P = proj(g0(f.p));
     const tw = reduce ? 0.8 : 0.55 + 0.45 * Math.sin(T * f.sp + f.ph);
-    const a = (P.z >= 0 ? 0.5 : 0.12) * tw;
+    const a = (P.z >= 0 ? 0.5 : 0.12) * tw * lit(0.25 + (f.ph / TAU) * 0.9);
     ctx.fillStyle = rgba(C.warm, a);
     const s = (P.z >= 0 ? 1.3 : 0.9) * P.k;
     ctx.fillRect(P.x - s / 2, P.y - s / 2, s, s);
@@ -313,10 +390,16 @@ function draw() {
   if (layers.calendar) {
     for (const ev of scene.events) { const P = proj(calPt(ev.th)); ev.P = P; objs.push({ z: P.z, fn: () => drawEvent(ev, P) }); }
   }
+  if (layers.macro) for (const mo of scene.macro || []) {
+    const th = mo.th0 + (reduce ? 0 : T * MACRO_RING.speed);
+    const P = proj(rotY(rotX([MACRO_RING.r * Math.cos(th), 0, MACRO_RING.r * Math.sin(th)], MACRO_RING.tilt), MACRO_RING.node));
+    mo.P = P; objs.push({ z: P.z, fn: () => drawMacro(mo, P) });
+  }
   // beams (under bulbs)
   if (layers.beams && layers.news && layers.markets) for (const b of scene.beams) drawBeam(b, g0);
   objs.sort((a, b) => a.z - b.z).forEach((o) => o.fn());
   if (layers.calendar) drawClock();
+  drawBursts();
 
   // bloom: downsample + additive upscale (refreshed less often on slower machines)
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -338,11 +421,26 @@ function draw() {
   if (layers.news) drawRegionLabels(g0);
   if (layers.markets) for (const pl of scene.planets) labelPlanet(pl);
   if (layers.calendar) for (const ev of scene.events) labelEvent(ev);
+  if (layers.macro) for (const mo of scene.macro || []) labelMacro(mo);
 }
 
 function drawNews(o, P) {
+  if (o.arrive) {
+    const u = (T - o.arrive) / 1.9;
+    if (u < 0) return; // still on its way
+    if (u < 1) { drawArrival(o, u); return; }
+  }
   const back = P.z < 0;
-  let a = (back ? 0.22 : 1) * (0.35 + 0.65 * o.fresh);
+  if (back) { // far side: out of focus, like bokeh behind the globe
+    halo(P.x, P.y, o.size * P.k * 4.5, o.color, 0.32 * (0.35 + 0.65 * o.fresh) * lit(1.2));
+    return;
+  }
+  let a = (0.35 + 0.65 * o.fresh) * lit(1.1 + hashN(o.n.id) * 0.9);
+  if (o.newUntil && T < o.newUntil) {
+    const u = ((T - o.arrive) * 0.8) % 1;
+    ctx.strokeStyle = rgba(C.gold, 0.6 * (1 - u)); ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(P.x, P.y, o.size * P.k * 1.6 + u * 12, 0, TAU); ctx.stroke();
+  }
   if (o.breaking && !reduce) a *= Math.sin(T * 5 + o.ph) > -0.2 ? 1 : 0.18; // old chaser blink
   const r = o.size * P.k * (hover?.ref === o ? 1.5 : 1);
   miniBulb(P.x, P.y, r, o.color, a);
@@ -351,11 +449,31 @@ function drawNews(o, P) {
     ctx.strokeStyle = rgba(C.gold, 0.5 * (1 - u)); ctx.lineWidth = 1.2;
     ctx.beginPath(); ctx.arc(P.x, P.y, r + u * 18, 0, TAU); ctx.stroke();
   }
-  if (!back) hits.push({ x: P.x, y: P.y, r: Math.max(6, r * 2), z: P.z, type: 'news', ref: o });
+  if (o.breaking && !reduce && Math.sin(T * 5 + o.ph) > -0.2) stamp('star', P.x, P.y, r * 6, o.color, 0.45 * a, T * 0.2);
+  hits.push({ x: P.x, y: P.y, r: Math.max(6, r * 2), z: P.z, type: 'news', ref: o });
+}
+
+// A new headline streaking in from space to its spot on the globe.
+function drawArrival(o, u) {
+  const g0 = (p) => rotY(p, spin);
+  const target = g0(o.p);
+  const side = hashN(o.n.id + 's') > 0.5 ? 1 : -1;
+  const start = [target[0] * 4.4 + side * 1.6, target[1] * 4.4 + 2.2, target[2] * 4.4];
+  const at = (t) => { const e = ease(t); return [start[0] + (target[0] - start[0]) * e, start[1] + (target[1] - start[1]) * e, start[2] + (target[2] - start[2]) * e]; };
+  for (let k = 12; k >= 1; k--) {
+    const Q = proj(at(Math.max(0, u - k * 0.022)));
+    miniBulb(Q.x, Q.y, Math.max(0.6, 2.2 * Q.k * (1 - k / 13)), C.gold, 0.5 * (1 - k / 13));
+  }
+  const H0 = proj(at(u));
+  miniBulb(H0.x, H0.y, 3.2 * H0.k, o.color, 1);
+  stamp('star', H0.x, H0.y, 16 * H0.k, C.gold, 0.8, u * 3);
 }
 
 function drawPlanet(pl, P) {
-  const a = depthA(P.z);
+  const idx = scene.planets.indexOf(pl);
+  const on = lit(1.0 + idx * 0.16);
+  if (on <= 0) return;
+  const a = depthA(P.z) * on;
   const r = pl.size * P.k * 0.82;
   const isSel = selected === pl.id, isHov = hover?.ref === pl;
   // comet trail along the orbit string
@@ -382,7 +500,26 @@ function drawPlanet(pl, P) {
     }
   }
   const flick = reduce ? 1 : 0.93 + 0.07 * Math.sin(T * 9 + pl.th0 * 7) * Math.sin(T * 3.1 + pl.th0);
-  c9(P.x, P.y, r, pl.color, a, 0, flick);
+  const pop = intro && on < 1 ? 1 + (1 - on) * 1.5 : 1; // bulbs flare as they switch on
+  const fl = pl.flash && T > pl.flash && T - pl.flash < 3 ? 1 - (T - pl.flash) / 3 : 0;
+  if (P.z < -0.9) halo(P.x, P.y - r * 0.5, r * 10, pl.color, 0.12 * a);
+  if (fl) {
+    halo(P.x, P.y - r * 0.5, r * (10 + 8 * fl), pl.color, 0.6 * fl);
+    const u = (T - pl.flash) % 1;
+    ctx.strokeStyle = rgba(C.gold, 0.8 * fl * (1 - u)); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(P.x, P.y - r * 0.5, r * 2.5 + u * 40, 0, TAU); ctx.stroke();
+  }
+  c9(P.x, P.y, r, pl.color, a, 0, flick * pop);
+  stamp('star', P.x, P.y - r * 0.55, r * (7.5 + 3 * fl) * pop, pl.color, (0.42 + 0.5 * fl) * a * flick, (reduce ? 0 : T * 0.05) + pl.th0);
+  // share of the typical daily range already travelled (14-day ATR)
+  const used = pl.inst.rangeUsed;
+  if (layers.levels && Number.isFinite(used)) {
+    const rr = r * 2.45, cyb = P.y - r * 0.5;
+    ctx.lineWidth = Math.max(1.2, 1.8 * P.k);
+    ctx.strokeStyle = rgba(C.wire, 0.12 * a); ctx.beginPath(); ctx.arc(P.x, cyb, rr, 0, TAU); ctx.stroke();
+    ctx.strokeStyle = rgba(used > 1 ? C.red : C.gold, 0.8 * a);
+    ctx.beginPath(); ctx.arc(P.x, cyb, rr, -Math.PI / 2, -Math.PI / 2 + TAU * Math.min(1, used)); ctx.stroke();
+  }
   if (pl.pulse && !reduce) {
     const u = (T * 0.55 + pl.th0) % 1;
     ctx.strokeStyle = rgba(pl.color, 0.55 * (1 - u) * a); ctx.lineWidth = 1.5;
@@ -401,7 +538,7 @@ function drawPlanet(pl, P) {
 
 function drawBeam(b, g0) {
   const A = g0(b.from.p), B = b.to.w;
-  if (!B) return;
+  if (!B || lit(2.4) <= 0 || (b.from.arrive && T < b.from.arrive + 1.9)) return;
   const m = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2, (A[2] + B[2]) / 2];
   const ml = Math.hypot(...m) || 1;
   const lift = ml + 0.55;
@@ -418,17 +555,51 @@ function drawBeam(b, g0) {
 }
 
 function drawEvent(ev, P) {
-  const a = depthA(P.z) * (ev.past ? 0.35 : 1);
+  const a = depthA(P.z) * (ev.past ? 0.35 : 1) * lit(1.7 + scene.events.indexOf(ev) * 0.05);
+  if (a <= 0.01) return;
   const r = (ev.high ? 4.4 : 3.2) * P.k;
   // hang outward from the string, like a light set
   const center = proj([0, 0, 0]);
   const ang = Math.atan2(P.x - center.x, -(P.y - center.y));
   const col = ev.high ? C.blue : C.amber;
-  const lit = ev.past ? 0.25 : ev.e.minutesAway < 60 && !reduce ? (Math.sin(T * 4) > 0 ? 1 : 0.4) : 1;
-  c9(P.x, P.y, r, col, a, ang, lit);
+  const on = ev.past ? 0.25 : ev.e.minutesAway < 60 && !reduce ? (Math.sin(T * 4) > 0 ? 1 : 0.4) : 1;
+  c9(P.x, P.y, r, col, a, ang, on);
+  if (ev.high && !ev.past) stamp('star', P.x + Math.sin(ang) * r * 0.6, P.y - Math.cos(ang) * r * 0.6, r * 5.5, col, 0.4 * a * on, ang);
   hits.push({ x: P.x + Math.sin(ang) * r, y: P.y - Math.cos(ang) * r, r: Math.max(9, r * 2.2), z: P.z + 0.3, type: 'event', ref: ev });
 }
 
+function drawMacro(mo, P) {
+  const a = depthA(P.z) * lit(1.4);
+  const r = 3.4 * P.k;
+  miniBulb(P.x, P.y, r, C.gold, a);
+  stamp('star', P.x, P.y, r * 5, C.gold, 0.3 * a);
+  hits.push({ x: P.x, y: P.y, r: 10, z: P.z + 0.2, type: 'macro', ref: mo });
+}
+function labelMacro(mo) {
+  const P = mo.P; if (!P || P.z < -0.6) return;
+  const m = mo.m, isY = m.id === 'US10Y';
+  const ch = isY ? `${m.change >= 0 ? '▲' : '▼'} ${Math.abs(m.change * 100).toFixed(1)} bp` : `${m.changePct >= 0 ? '▲' : '▼'} ${Math.abs(m.changePct).toFixed(2)}%`;
+  ctx.shadowColor = 'rgba(0,0,0,.85)'; ctx.shadowBlur = 5;
+  ctx.font = FONT(600, 11.5); ctx.fillStyle = rgba(C.cream, 0.75 * depthA(P.z)); ctx.textAlign = 'left';
+  if (lit(1.8) < 1) { ctx.shadowBlur = 0; return; }
+  ctx.fillText(`${isY ? '10Y' : m.id} ${FP.fmt(m.price, isY ? 3 : 2)}  ${ch}`, P.x + 8, P.y + 1);
+  ctx.shadowBlur = 0;
+}
+// Level crossed since the last update: a small burst of sparks from that market.
+function drawBursts() {
+  for (let i = bursts.length - 1; i >= 0; i--) {
+    const b = bursts[i], t = T - b.t0;
+    if (t > 2.2) { bursts.splice(i, 1); continue; }
+    if (t < 0 || !b.pl.P) continue;
+    const P = b.pl.P;
+    if (t < 0.05) halo(P.x, P.y, 60, C.gold, 0.9);
+    for (let k = 0; k < 26; k++) {
+      const ang = hashN(b.seed + 'a' + k) * TAU, sp = 50 + hashN(b.seed + 's' + k) * 90;
+      const x = P.x + Math.cos(ang) * sp * t, y = P.y + Math.sin(ang) * sp * t + 45 * t * t;
+      miniBulb(x, y, 1.5, k % 3 ? C.gold : b.up ? C.green : C.red, Math.max(0, 1 - t / 2.2));
+    }
+  }
+}
 function drawClock() {
   // hour ticks and the "now" marker on the release string
   for (let h = 0; h < 24; h += 3) {
@@ -437,7 +608,7 @@ function drawClock() {
     ctx.beginPath(); ctx.arc(P.x, P.y, 1.6 * P.k, 0, TAU); ctx.fill();
   }
   const N = proj(calPt(NOW_TH));
-  miniBulb(N.x, N.y, 3 * N.k, C.gold, 1);
+  miniBulb(N.x, N.y, 3 * N.k, C.gold, lit(1.6));
 }
 
 function label(x, y, parts, align = 'left') {
@@ -450,7 +621,8 @@ const FONT = (w, s) => `${w} ${s}px Archivo, system-ui, sans-serif`;
 
 function labelPlanet(pl) {
   const P = pl.P; if (!P) return;
-  const a = depthA(P.z);
+  const a = depthA(P.z) * lit(1.2 + scene.planets.indexOf(pl) * 0.16);
+  if (a <= 0.01) return;
   const r = pl.size * P.k * 0.82;
   const x = P.x + r * 1.6, y = P.y - r * 0.7;
   const i = pl.inst, s = pl.score;
@@ -466,6 +638,7 @@ function labelPlanet(pl) {
 function labelEvent(ev) {
   const P = ev.P; if (!P || P.z < -0.4 || ev.past) return;
   if (!ev.high && hover?.ref !== ev) return;
+  if (lit(2.2) < 1) return;
   ctx.shadowColor = 'rgba(0,0,0,.85)'; ctx.shadowBlur = 5;
   ctx.font = FONT(600, 11.5); ctx.fillStyle = rgba(C.cream, 0.78 * depthA(P.z)); ctx.textAlign = 'center';
   const short = ev.e.title.length > 26 ? ev.e.title.slice(0, 25) + '…' : ev.e.title;
@@ -482,7 +655,7 @@ function drawRegionLabels(g0) {
     if (P.z < 0.25) continue;
     // stay out of the way of market labels
     if (layers.markets && scene.planets.some((pl) => pl.P && Math.abs(pl.P.x + 50 - P.x) < 95 && Math.abs(pl.P.y - P.y) < 34)) continue;
-    ctx.font = FONT(600, 11); ctx.fillStyle = rgba(C.warm, 0.55 * clamp(P.z, 0, 1));
+    ctx.font = FONT(600, 11); ctx.fillStyle = rgba(C.warm, 0.55 * clamp(P.z, 0, 1) * lit(1.8));
     ctx.fillText(`${reg.name} (${counts[reg.name]})`, P.x, P.y);
   }
   ctx.textAlign = 'left';
@@ -498,6 +671,7 @@ function tipHtml(h) {
       <span class="${s.score >= 15 ? 'up' : s.score <= -15 ? 'down' : ''}">${esc(s.label)} ${sign(s.score, 0)}</span> <span class="m">${esc(s.confidence)} confidence</span><br>
       ${ns.support ? `<span class="up">Support ${fmt(ns.support.price, i.decimals)}</span> <span class="m">${esc(ns.support.codes.slice(0, 2).join(' + '))}</span><br>` : ''}
       ${ns.resistance ? `<span class="down">Resistance ${fmt(ns.resistance.price, i.decimals)}</span> <span class="m">${esc(ns.resistance.codes.slice(0, 2).join(' + '))}</span><br>` : ''}
+      ${Number.isFinite(i.rangeUsed) ? `<span class="m">Gold ring: ${Math.round(i.rangeUsed * 100)}% of the 14-day ATR used today</span><br>` : ''}
       <span class="m">Click for the full level ladder</span>`;
   }
   if (h.type === 'level') {
@@ -511,6 +685,10 @@ function tipHtml(h) {
       .map(([k, v]) => `<span class="${v > 0 ? 'up' : 'down'}">${esc(k)} ${v > 0 ? '▲' : '▼'}</span>`).join(' ');
     return `<b>${esc(n.title)}</b><br><span class="m">${esc(n.source)}${n.sources.length > 1 ? ` + ${n.sources.length - 1} more` : ''}, ${ago(n.publishedAt)}, ${esc(n.impact === 'med' ? 'medium' : n.impact)} impact</span>
       ${fx ? `<br>${fx}` : ''}${n.rules?.length ? `<br><span class="m">${esc(n.rules.join(', '))}</span>` : ''}<br><span class="m">Click to open the article</span>`;
+  }
+  if (h.type === 'macro') {
+    const m = h.ref.m, isY = m.id === 'US10Y';
+    return `<b>${esc(m.name)}</b><br><span class="big">${fmt(m.price, isY ? 3 : 2)}${isY ? '%' : ''}</span> <span class="${m.change >= 0 ? 'down' : 'up'}">${isY ? `${sign(m.change * 100, 1)} bp` : `${sign(m.changePct, 2)}%`}</span><br><span class="m">${esc(MACRO_NOTE[m.id] || '')}</span>`;
   }
   if (h.type === 'event') {
     const e = h.ref.e;
@@ -570,11 +748,12 @@ cv.addEventListener('wheel', (e) => { e.preventDefault(); cam.zoom = clamp(cam.z
 
 // ---------- HUD (layer toggles, legend, ticker) ----------
 function buildUi() {
-  const L = [['markets', 'Markets'], ['levels', 'Level moons'], ['news', 'Headlines'], ['beams', 'Beams'], ['calendar', 'Release string']];
+  const L = [['markets', 'Markets'], ['levels', 'Level moons'], ['news', 'Headlines'], ['beams', 'Beams'], ['calendar', 'Release string'], ['macro', 'Macro lanterns']];
   ui.innerHTML = `
     <div class="holo-tools" role="toolbar" aria-label="Globe layers">
       ${L.map(([k, t]) => `<button class="chip" data-layer="${k}" aria-pressed="${!!layers[k]}">${t}</button>`).join('')}
       <button class="chip" data-holo-reset>Reset view</button>
+      <button class="chip" data-holo-focus aria-pressed="false">Full screen</button>
       <button class="chip" data-layout="classic">Phone layout</button>
     </div>
     <div class="holo-legend">
@@ -583,15 +762,58 @@ function buildUi() {
       <div><i style="background:rgb(${C.amber});color:rgb(${C.amber})"></i>Neutral market</div>
       <div><i style="background:rgb(${C.warm});color:rgb(${C.warm})"></i>Headline (blinking = breaking)</div>
       <div><i style="background:rgb(${C.blue});color:rgb(${C.blue})"></i>High-impact release</div>
-      <p>Bulb size shows conviction. Moons beside each market are its key levels: red above price, green below. Drag to turn, scroll to zoom.</p>
+      <div><i style="background:rgb(${C.gold});color:rgb(${C.gold})"></i>VIX, dollar, 10Y lanterns</div>
+      <p>Bulb size shows conviction; the gold ring is how much of a normal day's range is used. Moons beside each market are its key levels: red above price, green below. Drag to turn, scroll to zoom, F for full screen.</p>
     </div>
+    <div class="holo-status" id="holoStatus"></div>
     <div class="holo-ticker" aria-label="High-impact headlines"><div class="tk"></div></div>`;
   ui.querySelector('.holo-tools').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.layer) { layers[b.dataset.layer] = !layers[b.dataset.layer]; b.setAttribute('aria-pressed', layers[b.dataset.layer]); FP.store.set('holoLayers', layers); dirty = true; }
     if (b.hasAttribute('data-holo-reset')) { cam.yaw = 0.55; cam.pitch = 0.42; cam.zoom = 1; dirty = true; }
+    if (b.hasAttribute('data-holo-focus')) setFocus(!focus);
   });
 }
+function setFocus(on) {
+  focus = on;
+  document.body.classList.toggle('focus', on);
+  const b = ui.querySelector('[data-holo-focus]');
+  if (b) { b.setAttribute('aria-pressed', on); b.textContent = on ? 'Show panels' : 'Full screen'; }
+  dirty = true;
+}
+// When is the next scheduled run? (cron: minute 3,13,...,53 Sun–Fri UTC; Sat every 3h at :17)
+function nextRun(now = new Date()) {
+  const t = new Date(now.getTime());
+  t.setUTCSeconds(0, 0);
+  for (let i = 0; i < 60 * 24 * 2; i++) {
+    t.setUTCMinutes(t.getUTCMinutes() + 1);
+    const d = t.getUTCDay(), m = t.getUTCMinutes(), h = t.getUTCHours();
+    if (d <= 5 && m % 10 === 3) return t;
+    if (d === 6 && m === 17 && h % 3 === 0) return t;
+  }
+  return null;
+}
+function status() {
+  const el = document.getElementById('holoStatus'); const d = FP.data;
+  if (!el || !d) return;
+  const n = nextRun();
+  el.innerHTML = `<b>Updated ${FP.esc(FP.ago(d.generatedAt))}</b>. Next scheduled update around ${n ? FP.etTime(n.toISOString()) + ' ET' : 'soon'}; GitHub sometimes starts it late. The page checks for new data every minute, and new headlines streak in when it lands.`;
+}
+setInterval(() => { if (enabled) status(); }, 15000);
+window.addEventListener('keydown', (e) => {
+  if (!enabled || e.metaKey || e.ctrlKey || e.altKey || /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName || '')) return;
+  const k = e.key;
+  if (k === 'f' || k === 'F') setFocus(!focus);
+  else if (k === 'ArrowLeft') cam.yaw -= 0.15;
+  else if (k === 'ArrowRight') cam.yaw += 0.15;
+  else if (k === 'ArrowUp') cam.pitch = clamp(cam.pitch - 0.1, -0.15, 1.15);
+  else if (k === 'ArrowDown') cam.pitch = clamp(cam.pitch + 0.1, -0.15, 1.15);
+  else if (k === '+' || k === '=') cam.zoom = clamp(cam.zoom * 1.12, 0.6, 1.9);
+  else if (k === '-') cam.zoom = clamp(cam.zoom / 1.12, 0.6, 1.9);
+  else if (k === ' ' && document.activeElement === document.body) { autoSpin = !autoSpin; e.preventDefault(); }
+  else return;
+  lastInteract = T; dirty = true;
+});
 function ticker(d) {
   const tk = ui.querySelector('.tk'); if (!tk) return;
   const items = (d.news || []).filter((n) => n.impact === 'high' || n.kind === 'breaking').slice(0, 14);
@@ -614,10 +836,11 @@ function loop(ts) {
   if (!reduce) {
     T += dt; spin += dt * 0.035;
     if (!drag) {
-      if (T - lastInteract > 6) cam.yaw += dt * 0.045;
+      if (T - lastInteract > 6 && autoSpin) cam.yaw += dt * 0.045;
       else { cam.yaw += cam.vyaw; cam.vyaw *= 0.92; }
     }
   }
+  if (intro && T - intro > 4.5) intro = null;
   layoutTarget();
   if (!reduce || dirty || Math.abs(tcx - cx) > 0.5) {
     draw(); dirty = false; frameNo++;
@@ -634,11 +857,16 @@ function start() { if (!raf && enabled) { last = performance.now(); raf = reques
 window.FPHolo = {
   enable(on) {
     enabled = on;
-    if (on) { if (!ui.childElementCount) buildUi(); resize(); layoutTarget(); cx = tcx; if (FP.data) setData(FP.data); start(); }
+    if (on) {
+      if (!ui.childElementCount) buildUi();
+      if (!introDone && !reduce) { intro = T; introDone = true; }
+      resize(); layoutTarget(); cx = tcx; if (FP.data) setData(FP.data); start();
+    }
     else { cancelAnimationFrame(raf); raf = 0; tip.hidden = true; }
   },
   setData(d) { if (ui.childElementCount) setData(d); else { buildUi(); setData(d); } },
   select(id) { selected = id; dirty = true; },
+  get focus() { return focus; },
   relayout() { dirty = true; },
   // dev aid: average ms per frame for n frames
   bench(n = 30) { const t0 = performance.now(); for (let i = 0; i < n; i++) { T += 0.016; draw(); } return +((performance.now() - t0) / n).toFixed(2); },

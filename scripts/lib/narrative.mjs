@@ -32,6 +32,7 @@ export function buildNarrative(inst, lv, sent, events, news) {
     : c.news >= 15 ? 'news flow leans bullish' : c.news <= -15 ? 'news flow leans bearish' : 'news flow is mixed';
   const macTxt = c.macro >= 15 ? 'macro is a tailwind' : c.macro <= -15 ? 'macro is a headwind' : 'macro is neutral';
   parts.push(`Technicals ${c.technical >= 15 ? 'lean bullish' : c.technical <= -15 ? 'lean bearish' : 'are balanced'}, ${newsTxt}, and ${macTxt}.`);
+  if (!stats.intraday) parts.push('Only daily data was available this update, so overnight, VWAP, initial-balance and volume-profile levels are left out.');
   if (stats.rangeUsed != null) {
     const pct = Math.round(stats.rangeUsed * 100);
     parts.push(`${pct}% of the 14-day ATR (${fmt(stats.atr, dec)}) is already used${pct >= 90 ? ' — the day is extended, so follow-through gets harder.' : '.'}`);

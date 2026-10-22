@@ -271,6 +271,13 @@ body.holo.sheet-open .holo-tools,body.holo.sheet-open .holo-ticker{right:472px}
 @media (prefers-reduced-motion: reduce){.bulb{animation:none}.tk.run{animation:none}}
 @media (max-width:1280px){.holo-legend{display:none}}
 body.holo header.top,body.holo nav.tabs,body.holo .sheet header{-webkit-backdrop-filter:none;backdrop-filter:none}
+body.holo .hud-left{transition:transform .32s cubic-bezier(.2,.8,.2,1),opacity .32s}
+body.holo.focus .hud-left{transform:translateX(calc(-100% - 32px));opacity:0;pointer-events:none}
+body.holo.focus .holo-legend,body.holo.focus .holo-ticker,body.holo.focus .holo-status{left:16px}
+.holo-legend,.holo-ticker,.holo-status{transition:left .32s,right .26s}
+.holo-status{position:fixed;left:432px;bottom:70px;z-index:5;max-width:520px;font-size:12.5px;line-height:1.45;color:var(--muted);padding:9px 12px;border-radius:12px;background:rgba(9,13,24,.78);border:1px solid var(--edge)}
+.holo-status b{color:var(--text);font-weight:600}
+@media (prefers-reduced-motion: reduce){body.holo .hud-left,.holo-legend,.holo-ticker,.holo-status{transition:none}}
 body.holo.sheet-open .holo-legend{display:none}
 body.holo.sheet-open .holo-tools{max-width:calc(100vw - 920px)}
 body.holo.sheet-open .holo-tools .chip[data-layer]{display:none}
@@ -418,6 +425,15 @@ function banners() {
   if (d.sample) h += `<div class="note">Sample data. Real prices, levels and headlines appear after the first GitHub Actions run (about two minutes after you enable it).</div>`;
   const age = (Date.now() - Date.parse(d.generatedAt)) / 60000;
   if (!d.sample && age > 40 && d.market?.open) h += `<div class="note bad">This data is ${Math.round(age)} minutes old. GitHub may be delaying the scheduled run; open Settings to start one now.</div>`;
+  const noPx = d.instruments.filter((i) => !Number.isFinite(i.price));
+  const errs = d.instruments.map((i) => i.error || '').join(' ');
+  const why = /429/.test(errs) ? 'Yahoo refused requests from GitHub’s servers (HTTP 429)' : 'the price sources didn’t respond';
+  if (noPx.length === d.instruments.length) h += `<div class="note bad">Prices didn’t load this update: ${why}. Each update retries on its own; Settings shows what every source returned.</div>`;
+  else if (noPx.length) h += `<div class="note bad">No price this update for ${esc(noPx.map((i) => i.id).join(', '))} (${why}).</div>`;
+  const stale = d.instruments.filter((i) => i.stale && Number.isFinite(i.price));
+  if (stale.length) h += `<div class="note">${esc(stale.map((i) => i.id).join(', '))}: showing the last good update, because this one couldn’t fetch new prices.</div>`;
+  const dailyOnly = d.instruments.filter((i) => i.intraday === false && Number.isFinite(i.price));
+  if (dailyOnly.length) h += `<div class="note">${esc(dailyOnly.map((i) => i.id).join(', '))}: intraday data was unavailable, so these use daily data from the backup source (fewer levels, quote may lag).</div>`;
   if (S.tab === 'board') {
     const brk = (d.news || []).filter((n) => n.kind === 'breaking').slice(0, 2);
     for (const n of brk) h += `<a class="breaking" href="${esc(safeUrl(n.url))}" target="_blank" rel="noopener"><strong><span class="dot"></span> ${esc(n.title)}</strong><div class="meta">${esc(n.source)}${n.sources.length > 1 ? `, ${n.sources.length} outlets` : ''}, ${ago(n.publishedAt)}</div>${fxChips(n, 5)}</a>`;
@@ -433,7 +449,7 @@ const fxChips = (n, max = 8, focus = null) => {
 
 function viewBoard(d) {
   const rows = d.instruments.map((i) => {
-    if (i.error && !i.price) return `<div class="row"><div class="r1"><span class="sym">${esc(i.id)}</span><span class="muted">${esc(i.name)}</span></div><div class="err">No price data this run: ${esc(i.error)}</div></div>`;
+    if (!Number.isFinite(i.price)) return `<div class="row"><div class="r1"><span class="sym">${esc(i.id)}</span><span class="muted">${esc(i.name)}</span></div><div class="err">No price this update.</div><div class="muted" style="font-size:12px;margin-top:2px">${esc(i.error || '')}</div></div>`;
     const s = i.sentiment, dec = i.decimals;
     const sup = i.nearest?.support, res = i.nearest?.resistance;
     let pos = 50;
@@ -623,7 +639,7 @@ function renderDetail() {
     <div class="list">${heads.length ? heads.map((n) => newsItem(n, i.id)).join('') : '<div class="empty">No scored headlines for this market in the last 36 hours.</div>'}</div>
 
     <a class="tv" href="${tv}" target="_blank" rel="noopener">Open ${esc(i.id)} chart in TradingView</a>
-    ${i.dataSymbol ? `<div class="tagline">Prices from ${esc(i.dataSymbol)} on Yahoo Finance; micro and full-size contracts quote the same price.</div>` : ''}
+    ${i.dataSymbol ? `<div class="tagline">Prices from ${esc(i.dataSymbol)} via ${esc(i.source || 'Yahoo')}; micro and full-size contracts quote the same price. Free quotes can lag your broker’s feed.</div>` : ''}
   </div>`;
 }
 
@@ -773,7 +789,7 @@ mqWide.addEventListener?.('change', applyLayout);
 window.FP = {
   get data() { return S.data; }, store, esc, fmt, sign, ago, until, etTime, safeUrl,
   openDetail: (id) => openDetail(id), setTab: (t) => { S.tab = t; render(); },
-  panelRight: () => (document.body.classList.contains('holo') ? $('#hud').getBoundingClientRect().right : 0),
+  panelRight: () => (document.body.classList.contains('holo') && !document.body.classList.contains('focus') ? $('#hud').getBoundingClientRect().right : 0),
   sheetOpen: () => $('#sheet').classList.contains('open'),
   onHoloReady: () => applyLayout(),
 };

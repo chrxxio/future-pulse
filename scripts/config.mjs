@@ -9,22 +9,24 @@
 // day:   the instrument's main US day session in ET minutes [start, end] — used
 //        for "NY open", day-session close and the initial balance.
 // pointValue: $ per 1.00 price move for ONE micro contract (CME contract specs).
+// stooq: fallback daily-data symbol on stooq.com (front-month continuous); used only
+//        when Yahoo refuses. Best effort — if one fails, Feed health shows it.
 
 export const INSTRUMENTS = [
   { id: 'MES', name: 'Micro E-mini S&P 500', group: 'equity', tags: ['spx'],
-    yahoo: ['ES=F', 'MES=F'], tick: 0.25, pointValue: 5, day: [570, 960], ib: true },
+    yahoo: ['ES=F', 'MES=F'], stooq: 'es.f', tick: 0.25, pointValue: 5, day: [570, 960], ib: true },
   { id: 'MNQ', name: 'Micro E-mini Nasdaq-100', group: 'equity', tags: ['tech'],
-    yahoo: ['NQ=F', 'MNQ=F'], tick: 0.25, pointValue: 2, day: [570, 960], ib: true },
+    yahoo: ['NQ=F', 'MNQ=F'], stooq: 'nq.f', tick: 0.25, pointValue: 2, day: [570, 960], ib: true },
   { id: 'MYM', name: 'Micro E-mini Dow', group: 'equity', tags: ['dow'],
-    yahoo: ['YM=F', 'MYM=F'], tick: 1, pointValue: 0.5, day: [570, 960], ib: true },
+    yahoo: ['YM=F', 'MYM=F'], stooq: 'ym.f', tick: 1, pointValue: 0.5, day: [570, 960], ib: true },
   { id: 'M2K', name: 'Micro E-mini Russell 2000', group: 'equity', tags: ['smallcap'],
-    yahoo: ['RTY=F', 'M2K=F'], tick: 0.1, pointValue: 5, day: [570, 960], ib: true },
+    yahoo: ['RTY=F', 'M2K=F'], stooq: 'rty.f', tick: 0.1, pointValue: 5, day: [570, 960], ib: true },
   { id: 'MGC', name: 'Micro Gold', group: 'gold', tags: ['metal'],
-    yahoo: ['GC=F', 'MGC=F'], tick: 0.1, pointValue: 10, day: [500, 810] },
+    yahoo: ['GC=F', 'MGC=F'], stooq: 'gc.f', tick: 0.1, pointValue: 10, day: [500, 810] },
   { id: 'SIL', name: 'Micro Silver', group: 'silver', tags: ['metal'],
-    yahoo: ['SI=F', 'SIL=F'], tick: 0.005, pointValue: 1000, day: [505, 805] },
+    yahoo: ['SI=F', 'SIL=F'], stooq: 'si.f', tick: 0.005, pointValue: 1000, day: [505, 805] },
   { id: 'MCL', name: 'Micro WTI Crude Oil', group: 'oil', tags: ['energy'],
-    yahoo: ['CL=F', 'MCL=F'], tick: 0.01, pointValue: 100, day: [540, 870] },
+    yahoo: ['CL=F', 'MCL=F'], stooq: 'cl.f', tick: 0.01, pointValue: 100, day: [540, 870] },
   { id: 'MBT', name: 'Micro Bitcoin', group: 'crypto', tags: ['btc'],
     yahoo: ['BTC=F', 'MBT=F'], tick: 5, pointValue: 0.1, day: [570, 960] },
 ];

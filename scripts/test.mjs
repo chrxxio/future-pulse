@@ -144,6 +144,61 @@ ok('Sunday evening open');
   ok('missing prices fall back to last good data; failing feeds reported');
 }
 
+// Backup source: Yahoo unavailable for a market -> Stooq daily data with fewer levels.
+{
+  const fx = rth.env.FIXTURE_OUT;
+  const mes = INSTRUMENTS.find((i) => i.id === 'MES');
+  for (const r of [['1y', '1d'], ['3mo', '60m'], ['5d', '5m']]) for (const s of mes.yahoo) {
+    await fs.rm(path.join(fx, fixtureName(chartUrl('https://query1.finance.yahoo.com', s, ...r))), { force: true });
+  }
+  let csv = 'Date,Open,High,Low,Close,Volume\n', p = 5900;
+  for (let k = 200; k >= 1; k--) {
+    const d = new Date(Date.parse('2026-10-22T12:00:00Z') - k * 864e5);
+    if (d.getUTCDay() === 0 || d.getUTCDay() === 6) continue;
+    const o = p, c = p + Math.sin(k) * 40; p = c;
+    csv += `${d.toISOString().slice(0, 10)},${o.toFixed(2)},${(Math.max(o, c) + 20).toFixed(2)},${(Math.min(o, c) - 20).toFixed(2)},${c.toFixed(2)},100000\n`;
+  }
+  await fs.writeFile(path.join(fx, fixtureName('https://stooq.com/q/d/l/?s=es.f&i=d')), csv);
+  await fs.writeFile(path.join(fx, fixtureName('https://stooq.com/q/l/?s=es.f&f=sd2t2ohlcv&h&e=csv')), 'Symbol,Date,Time,Open,High,Low,Close,Volume\nES.F,2026-10-22,14:39:00,5951.25,5990.5,5940,5975.75,80000\n');
+  run('update.mjs', { FIXTURE_DIR: fx, FIXTURE_NOW: '2026-10-22T15:00:00.000Z', DIST_DIR: rth.env.DIST_DIR, STATE_DIR: path.join(rth.dir, 'state2'), SAMPLE: '1' });
+  const d = JSON.parse(await fs.readFile(path.join(rth.env.DIST_DIR, 'data', 'market.json'), 'utf8'));
+  const m = d.instruments.find((i) => i.id === 'MES');
+  assert.equal(m.source, 'Stooq (daily only)');
+  assert.equal(m.intraday, false);
+  assert.equal(m.price, 5975.75);
+  for (const c of ['PDH', 'PDL', 'P']) assert.ok(m.levels.some((l) => l.codes.includes(c)) || Math.abs(m.session.pdh - m.price) > 3 * m.atr, `daily-only has ${c}`);
+  assert.ok(!m.levels.some((l) => l.codes.includes('VWAP')), 'no VWAP without intraday');
+  checkShape(d, 'stooq');
+  ok('Yahoo refused -> Stooq daily data, with intraday-only levels left out');
+}
+
+// Browser-style fetcher (Python) against a mock Yahoo that answers 429 first.
+{
+  const py = process.env.PYTHON || 'python3';
+  const probe = spawnSync(py, ['-c', 'import importlib.util,sys; sys.exit(0 if (importlib.util.find_spec("curl_cffi") or importlib.util.find_spec("requests")) else 1)']);
+  if (probe.status !== 0) console.log('  - skipped Python fetcher test (needs curl_cffi or requests; set PYTHON=...)');
+  else {
+    const port = 18000 + Math.floor(Math.random() * 2000);
+    const mock = spawn(py, [path.join(ROOT, 'scripts', 'mock_yahoo.py'), path.join(tmp, 'pre', 'fx'), String(port)], { stdio: 'ignore' });
+    await new Promise((r) => setTimeout(r, 800));
+    const plan = path.join(tmp, 'plan.json'), outDir = path.join(tmp, 'prices');
+    await fs.writeFile(plan, run('price-plan.mjs', {}));
+    const r = spawnSync(py, [path.join(ROOT, 'scripts', 'fetch_prices.py'), plan, outDir], {
+      env: { ...process.env, YF_HOSTS: `http://127.0.0.1:${port}`, YF_COOKIE_URL: `http://127.0.0.1:${port}/`, YF_GAP_SECONDS: '0.01' }, encoding: 'utf8',
+    });
+    mock.kill();
+    assert.equal(r.status, 0, r.stderr);
+    const rep = JSON.parse(await fs.readFile(path.join(outDir, '_report.json'), 'utf8'));
+    assert.equal(rep.failed, 0, 'all requests recovered from 429');
+    assert.ok(rep.ok >= INSTRUMENTS.length * 3, 'all series saved');
+    // second run within the cache window refetches only the 5-minute bars
+    const r2 = spawnSync(py, [path.join(ROOT, 'scripts', 'fetch_prices.py'), plan, outDir], { env: { ...process.env, YF_HOSTS: 'http://127.0.0.1:9', YF_COOKIE_URL: 'http://127.0.0.1:9/', YF_GAP_SECONDS: '0' }, encoding: 'utf8' });
+    const rep2 = JSON.parse(await fs.readFile(path.join(outDir, '_report.json'), 'utf8'));
+    assert.ok(r2.status === 0 && rep2.cached >= INSTRUMENTS.length * 2, 'daily/hourly history served from cache');
+    ok(`browser-style fetcher retries 429s and caches history (${rep.mode})`);
+  }
+}
+
 // AI path against a local mock of the Messages API.
 {
   let seenBody = null;

@@ -39,11 +39,12 @@ async function main() {
   await fs.cp(path.join(ROOT, 'app'), DIST, { recursive: true });
 
   const state = (await readJSON(path.join(STATE_DIR, 'state.json'), {})) || {};
+  const priceReport = process.env.PRICE_CACHE_DIR ? await readJSON(path.join(process.env.PRICE_CACHE_DIR, '_report.json'), null) : null;
   const prev = await readJSON(path.join(STATE_DIR, 'last.json'), null);
 
   // ---- fetch everything in parallel ----
   const [instData, macroArr, newsRaw, cal] = await Promise.all([
-    pool(INSTRUMENTS, 3, async (inst) => {
+    pool(INSTRUMENTS, 2, async (inst) => {
       try { return { inst, data: await loadInstrumentBars(inst) }; }
       catch (e) { return { inst, error: String(e.message || e) }; }
     }),
@@ -86,7 +87,7 @@ async function main() {
         .sort((a, b) => b.s - a.s).slice(0, 12).map((x) => x.id);
       const meta = data.meta || {};
       instruments.push({
-        id: inst.id, name: inst.name, group: inst.group, dataSymbol: data.symbol,
+        id: inst.id, name: inst.name, group: inst.group, dataSymbol: data.symbol, source: data.source, intraday: data.intraday,
         tick: inst.tick, decimals: lv.stats.dec || decimalsFor(inst.tick), pointValue: inst.pointValue,
         price: lv.stats.price, prevClose: lv.stats.pdc, change: lv.stats.change, changePct: lv.stats.changePct,
         asOf: meta.regularMarketTime ? new Date(meta.regularMarketTime * 1000).toISOString() : null,
@@ -146,7 +147,8 @@ async function main() {
     feeds: [
       ...newsRaw.health,
       { name: 'Economic calendar (Forex Factory)', ok: cal.raw.length > 0, count: cal.raw.length, error: cal.errors.join('; ') || undefined, cached: cal.cached },
-      ...instData.map(({ inst, data, error }) => ({ name: `Prices: ${inst.id}${data ? ` (${data.symbol})` : ''}`, ok: !!data, count: data ? data.m5.length : 0, error })),
+      ...instData.map(({ inst, data, error }) => ({ name: `Prices: ${inst.id}${data ? ` (${data.symbol}, ${data.source})` : ''}`, ok: !!data, count: data ? data.m5.length || data.daily.length : 0, error })),
+      ...(priceReport ? [{ name: `Browser-style price fetch (${priceReport.mode})`, ok: priceReport.ok > 0, count: priceReport.ok, error: priceReport.failed ? `${priceReport.failed} requests refused: ${priceReport.lastError || ''}`.trim() : undefined }] : []),
     ],
     ai: {
       enabled: aiEnabled(), model: aiEnabled() ? SETTINGS.aiModel : null,

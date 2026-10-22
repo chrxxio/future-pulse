@@ -19,8 +19,11 @@ On a phone it is a compact list. On a computer (browser window 1024px or wider) 
 | Fairy lights on the globe | Headlines, grouped into regions (Equities, Fed and data, Energy, Geopolitics and trade, Metals, Crypto); blinking = breaking |
 | Beams | Which markets a high-impact headline moves |
 | Outer light string | Scheduled releases on a 24-hour clock counting toward the gold "now" bulb; blue = high impact |
+| Gold ring around a market | How much of a normal day's range (14-day ATR) is already used; turns red past 100% |
+| Gold lanterns near the globe | VIX, dollar index and the 10-year yield |
+| Shooting stars | Headlines that arrived in the latest update; markets whose sentiment flipped flash, and a level cross sets off sparks |
 
-Drag to turn it, scroll to zoom, hover any bulb for details, click a market for its level ladder, click a headline to open the article. Layer buttons turn each bulb type on or off, and *Phone layout* switches to the list view (the globe icon switches back). The globe pauses its animation when your system asks for reduced motion, and lowers its glow quality automatically on slower machines.
+Drag to turn it, scroll to zoom (or arrow keys and +/−), press **F** for a full-screen globe, space to pause the spin, hover any bulb for details, click a market for its level ladder, click a headline to open the article. Layer buttons turn each bulb type on or off, and *Phone layout* switches to the list view (the globe icon switches back). The globe pauses its animation when your system asks for reduced motion, and lowers its glow quality automatically on slower machines.
 
 There is no server to run. The app is a static page on GitHub Pages; the workflow redeploys it with fresh data.
 
@@ -80,9 +83,10 @@ Labels: ≥ +40 strong bullish, ≥ +15 bullish, between −15 and +15 neutral, 
 
 ## Limits to know about
 
-- **Prices** come from Yahoo Finance's public chart data, using the full-size continuous contract (ES, NQ, YM, RTY, GC, SI, CL, BTC) because its history is deeper. Micro and full-size contracts trade at the same price. Futures quotes there can be delayed, so each market shows the quote time. Around contract rolls, prior-day levels can be off by the roll spread for a session.
+- **Prices** come from Yahoo Finance's public chart data, using the full-size continuous contract (ES, NQ, YM, RTY, GC, SI, CL, BTC) because its history is deeper. Micro and full-size contracts trade at the same price. Yahoo answers plain requests from GitHub's servers with HTTP 429, so the workflow fetches with a browser-style connection (`scripts/fetch_prices.py`, using `curl_cffi`) and caches the daily and hourly history between runs so each update makes only a handful of requests. If Yahoo still refuses, the app falls back to Stooq daily data and says so on screen (fewer levels: no overnight, VWAP or volume-profile levels). Free quotes can lag your broker's feed by several minutes; each market shows its quote time. Around contract rolls, prior-day levels can be off by the roll spread for a session.
 - **Timing**: GitHub starts scheduled runs late under load, sometimes by 15+ minutes. The header turns amber after 15 minutes and red after 40. Use *Start update* if needed.
-- **Inactivity**: GitHub disables schedules in public repos with no repository activity for 60 days. It emails you first; push any commit or click *Enable workflow* to resume.
+- **Inactivity**: GitHub disables schedules in public repos with no repository activity for 60 days. The workflow commits a timestamp to `.github/keepalive` when the last commit is 50 days old, which should keep it active. If it ever does get paused, GitHub emails you; click *Enable workflow* in the Actions tab.
+- **Uptime**: the page itself is static and stays online around the clock on GitHub Pages; only the data refreshes on the schedule. Pages limits are 1 GB per site and a soft 100 GB of bandwidth per month, far above what one person uses. Anyone with the link can open it, but repository secrets (API keys, push topics) never reach the page.
 - **Feeds** occasionally block or change. Failures are skipped and listed in *Settings → Feed health*; edit the list in `scripts/config.mjs`.
 - **News scoring** is rule-based on headlines. It surfaces direction and impact fast but cannot read nuance the way a person can; the "Why it matters" line shows which rule fired so you can judge it.
 

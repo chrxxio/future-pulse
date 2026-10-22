@@ -7,7 +7,7 @@ import {
   atr as calcAtr, ema, niceStep, roundTo, sessionKey, weekKey, last, clamp, fmt, decimalsFor,
 } from './util.mjs';
 import {
-  buildSessions, aggregate, vwap, volumeProfile, swings, clusterSwings,
+  buildSessions, aggregate, vwap, volumeProfile, swings, clusterSwings, dailySessions,
 } from './market.mjs';
 import { SETTINGS } from '../config.mjs';
 
@@ -37,14 +37,16 @@ export function analyzeLevels(inst, data, nowMs = Date.now()) {
   const dec = Math.max(decimalsFor(tick), 0);
   const snap = (x) => +roundTo(x, tick).toFixed(dec);
 
-  const s5 = buildSessions(data.m5, inst);
-  const sH = buildSessions(data.hourly, inst);
+  // With no intraday data (daily-only fallback source), daily bars stand in for sessions.
+  const intraday = data.m5.length > 0;
+  const s5 = intraday ? buildSessions(data.m5, inst) : dailySessions(data.daily);
+  const sH = data.hourly.length ? buildSessions(data.hourly, inst) : dailySessions(data.daily);
   const nowKey = sessionKey(nowMs);
   const lastS = last(s5);
   const live = lastS && lastS.key >= nowKey; // current session in progress (or just closed today)
   const cur = live ? lastS : null;
   const prior = live ? s5[s5.length - 2] : lastS;
-  const price = snap(data.meta?.regularMarketPrice ?? last(data.m5).c);
+  const price = snap(data.meta?.regularMarketPrice ?? (last(data.m5) || last(data.daily)).c);
 
   // Daily ATR from completed daily bars only.
   const dailyDone = data.daily.filter((b) => sessionKey(b.t) < (cur ? cur.key : nowKey));
@@ -261,7 +263,7 @@ export function analyzeLevels(inst, data, nowMs = Date.now()) {
   const pdc = prior ? prior.dayClose ?? prior.c : null;
 
   const stats = {
-    price, atr: A, tick, dec,
+    price, atr: A, tick, dec, intraday,
     sessionKey: cur?.key || null,
     live: !!cur,
     sessionOpen: cur?.o ?? null,
@@ -279,7 +281,7 @@ export function analyzeLevels(inst, data, nowMs = Date.now()) {
   };
 
   // Sparkline of the current (or last) session, downsampled to <= 96 points.
-  const sb = (cur || prior || { bars: data.m5.slice(-96) }).bars;
+  const sb = intraday ? (cur || prior || { bars: data.m5.slice(-96) }).bars : data.daily.slice(-60);
   const stepN = Math.max(1, Math.ceil(sb.length / 96));
   const spark = sb.filter((_, i) => i % stepN === 0).map((b) => +b.c.toFixed(dec));
 

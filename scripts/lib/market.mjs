@@ -1,20 +1,50 @@
-// Price data from Yahoo Finance's public chart endpoint, plus session building.
-import { fetchJSON, sessionKey, etParts, weekKey, monthKey, last } from './util.mjs';
+// Price data. Sources, in order:
+//   1. Yahoo chart data pre-fetched by scripts/fetch_prices.py, which connects with a
+//      Chrome-like TLS fingerprint (Yahoo answers plain server requests with HTTP 429).
+//   2. Yahoo fetched directly from Node (works from home internet; often 429 on GitHub).
+//   3. Stooq daily data (no intraday) — levels from overnight/VWAP/volume are skipped.
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fetchJSON, fetchText, sessionKey, etParts, weekKey, monthKey, last, sleep } from './util.mjs';
 
 const HOSTS = ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com'];
+const CACHE = process.env.PRICE_CACHE_DIR || '';
+// how old a pre-fetched file may be before it is ignored
+const MAX_AGE = { '1d': 6 * 3600e3, '60m': 2 * 3600e3, '5m': 25 * 60e3 };
 
 export const chartUrl = (host, symbol, range, interval) =>
   `${host}/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}&includePrePost=true&events=div%2Csplits`;
+export const cacheKey = (symbol, range, interval) => `${symbol}_${range}_${interval}`.replace(/[^A-Za-z0-9._=-]+/g, '_') + '.json';
 
-async function chart(symbol, range, interval) {
+async function fromCache(symbol, range, interval) {
+  if (!CACHE) return null;
+  const f = path.join(CACHE, cacheKey(symbol, range, interval));
+  try {
+    const st = await fs.stat(f);
+    if (Date.now() - st.mtimeMs > (MAX_AGE[interval] || 3600e3)) return null;
+    const r = JSON.parse(await fs.readFile(f, 'utf8'))?.chart?.result?.[0];
+    return r || null;
+  } catch { return null; }
+}
+
+async function chart(symbol, range, interval, via) {
+  const cached = await fromCache(symbol, range, interval);
+  if (cached) { via.add('browser-style fetch'); return cached; }
   let lastErr;
   for (const host of HOSTS) {
-    try {
-      const j = await fetchJSON(chartUrl(host, symbol, range, interval), { timeout: 15000, retries: 1 });
-      const r = j?.chart?.result?.[0];
-      if (!r) throw new Error(j?.chart?.error?.description || 'empty chart');
-      return r;
-    } catch (e) { lastErr = e; }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const j = await fetchJSON(chartUrl(host, symbol, range, interval), { timeout: 15000, retries: 0 });
+        const r = j?.chart?.result?.[0];
+        if (!r) throw new Error(j?.chart?.error?.description || 'empty chart');
+        via.add('direct');
+        return r;
+      } catch (e) {
+        lastErr = e;
+        if (!/429/.test(String(e.message))) break;      // only back off on rate limiting
+        await sleep(1500 + Math.random() * 1500);
+      }
+    }
   }
   throw lastErr;
 }
@@ -31,22 +61,19 @@ export function toBars(result) {
   return bars;
 }
 
-// Fetch daily (1y), hourly (3mo) and 5-minute (5d) bars for one instrument.
-export async function loadInstrumentBars(inst) {
+async function loadYahoo(inst) {
   let lastErr;
   for (const symbol of inst.yahoo) {
     try {
-      const [d, h, m5] = await Promise.all([
-        chart(symbol, '1y', '1d'),
-        chart(symbol, '3mo', '60m'),
-        chart(symbol, '5d', '5m'),
-      ]);
+      const via = new Set();
+      // sequential, not parallel: bursts are what trip Yahoo's limiter
+      const d = await chart(symbol, '1y', '1d', via);
+      const h = await chart(symbol, '3mo', '60m', via);
+      const m5 = await chart(symbol, '5d', '5m', via);
       const out = {
-        symbol,
+        symbol, source: `Yahoo (${[...via].join(' + ')})`, intraday: true,
         meta: m5.meta || d.meta || {},
-        daily: toBars(d),
-        hourly: toBars(h),
-        m5: toBars(m5),
+        daily: toBars(d), hourly: toBars(h), m5: toBars(m5),
       };
       if (out.m5.length < 20 || out.daily.length < 20) throw new Error('not enough bars');
       return out;
@@ -55,8 +82,59 @@ export async function loadInstrumentBars(inst) {
   throw lastErr;
 }
 
+// Stooq: daily history + latest quote. Symbols like "es.f" (front-month continuous).
+const STOOQ = 'https://stooq.com';
+function parseCsv(text) {
+  const lines = text.trim().split(/\r?\n/);
+  const head = lines.shift()?.split(',').map((x) => x.trim().toLowerCase()) || [];
+  return lines.map((l) => Object.fromEntries(l.split(',').map((v, i) => [head[i], v.trim()])));
+}
+async function loadStooq(inst) {
+  if (!inst.stooq) throw new Error('no Stooq symbol configured');
+  const rows = parseCsv(await fetchText(`${STOOQ}/q/d/l/?s=${inst.stooq}&i=d`, { timeout: 15000, retries: 1 }));
+  const daily = rows.map((r) => ({
+    // noon ET on the trading date maps cleanly onto that session
+    t: Date.parse(`${r.date}T16:00:00Z`), o: +r.open, h: +r.high, l: +r.low, c: +r.close, v: +(r.volume || 0),
+  })).filter((b) => Number.isFinite(b.t) && b.h > 0 && b.l > 0).slice(-260);
+  if (daily.length < 30) throw new Error(/limit/i.test(rows[0]?.date || '') ? 'Stooq daily limit reached' : 'no Stooq data');
+  let price = last(daily).c;
+  try {
+    const q = parseCsv(await fetchText(`${STOOQ}/q/l/?s=${inst.stooq}&f=sd2t2ohlcv&h&e=csv`, { timeout: 12000 }))[0];
+    if (q && +q.close > 0) {
+      price = +q.close;
+      const lastBar = last(daily);
+      if (q.date && new Date(lastBar.t).toISOString().slice(0, 10) !== q.date && +q.open > 0) {
+        daily.push({ t: Date.parse(`${q.date}T16:00:00Z`), o: +q.open, h: +q.high, l: +q.low, c: +q.close, v: +(q.volume || 0) });
+      } else if (+q.high > 0) { Object.assign(lastBar, { h: Math.max(lastBar.h, +q.high), l: Math.min(lastBar.l, +q.low), c: +q.close }); }
+    }
+  } catch { /* quote is optional */ }
+  return {
+    symbol: inst.stooq.toUpperCase(), source: 'Stooq (daily only)', intraday: false,
+    meta: { regularMarketPrice: price, regularMarketTime: null }, // Stooq quote times carry no time zone, so none is shown
+    daily, hourly: [], m5: [],
+  };
+}
+
+export async function loadInstrumentBars(inst) {
+  const errors = [];
+  try { return await loadYahoo(inst); } catch (e) { errors.push(`Yahoo: ${e.message}`); }
+  try { return await loadStooq(inst); } catch (e) { errors.push(`Stooq: ${e.message}`); }
+  throw new Error(errors.join('; '));
+}
+
+// Daily bars as pseudo-sessions, for when no intraday data is available.
+export function dailySessions(daily) {
+  return daily.map((b) => {
+    const key = sessionKey(b.t);
+    return {
+      key, week: weekKey(key), month: monthKey(key), o: b.o, h: b.h, l: b.l, c: b.c, v: b.v, bars: [],
+      start: b.t, end: b.t, overnight: null, dayOpen: null, dayClose: b.c, dayStarted: false, dayDone: true, ib: null,
+    };
+  });
+}
+
 export async function loadMacro(m) {
-  const r = await chart(m.yahoo, '1mo', '1d');
+  const r = await chart(m.yahoo, '1mo', '1d', new Set());
   const bars = toBars(r);
   const price = r.meta?.regularMarketPrice ?? last(bars)?.c;
   // previous close = last completed daily close before today's bar
